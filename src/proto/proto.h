@@ -44,4 +44,33 @@ size_t proto_encode(uint8_t dev_id, uint8_t func, uint16_t seq,const uint8_t *pa
  */
 int proto_decode(const uint8_t *frame, size_t frame_len,uint8_t *dev_id_out, uint8_t *func_out, uint16_t *seq_out,uint8_t *payload_out, size_t payload_cap,size_t *payload_len_out);
 
+/* ===== 流式切包状态机 ===== */
+/* 解决的问题：TCP 是字节流，一次 recv 可能收到半帧、也可能收到几帧。
+ * 本模块按字节喂入，攒够一帧就交出一整帧（含帧头帧尾的线上字节）。
+ * 因为状态保存在结构体里，所以与"数据怎么分块送达"无关。 */
+
+typedef enum {
+    FRAME_STATE_IDLE = 0,   /* 等待帧头 0x7E */
+    FRAME_STATE_COLLECT     /* 帧进行中，收集直到下一个 0x7E */
+} frame_state_t;
+
+typedef struct {
+    uint8_t       buf[PROTO_FRAME_WIRE_MAX];  /* 含帧头；帧尾到达后也算在内 */
+    size_t        len;                        /* 当前已累积字节数 */
+    frame_state_t state;
+    size_t        stat_frames;                /* 累计成功切出的帧数 */
+    size_t        stat_discarded;             /* 累计因超长而丢弃的次数 */
+} frame_parser_t;
+
+/* 初始化：清零全部字段。不调用它直接用是未定义行为。 */
+void frame_parser_init(frame_parser_t *p);
+
+/* 喂入一个字节。
+ *   返回  1：切出一整帧，写入 out_frame，长度写入 *out_len
+ *   返回  0：还不够，继续喂
+ *   返回 -1：缓冲区超限，本帧已丢弃并重新同步
+ *   返回 -2：out_cap 不足（调用方应至少给 PROTO_FRAME_WIRE_MAX）
+ */
+int frame_parser_feed(frame_parser_t *p, uint8_t byte,uint8_t *out_frame, size_t out_cap, size_t *out_len);
+
 #endif /* PROTO_H */
