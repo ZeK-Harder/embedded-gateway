@@ -36,12 +36,12 @@ size_t proto_unescape(const uint8_t *in, size_t in_len, uint8_t *out, size_t out
 size_t proto_encode(uint8_t dev_id, uint8_t func, uint16_t seq,const uint8_t *payload, size_t payload_len,uint8_t *out_buf, size_t out_cap);
 
 /* 解码：把一整帧（含帧头帧尾的线上字节）还原为字段
- *   frame / frame_len 为一整帧的线上字节
- *   dev_id / func / seq 为输出参数（可为 NULL 表示不关心）
- *   payload_out / payload_cap 为载荷输出缓冲区
- *   payload_len_out 输出实际载荷长度
- *   返回：0 成功，-1 失败（长度非法 / 转义非法 / CRC 不符 / 容量不足）
- *
- * 本步先不实现，下一步做
+ *   frame / frame_len：一整帧的线上字节及其长度
+ *   dev_id_out / func_out / seq_out：出参，传 NULL 表示不关心该字段
+ *   payload_out / payload_cap：载荷输出缓冲区及其容量（必须非 NULL）
+ *   payload_len_out：输出实际载荷长度（必须非 NULL）
+ *   返回：0 成功；-1 失败（参数非法 / 帧界不对 / 转义非法 / LEN 不一致 / CRC 不符 / 容量不足）
  */
+int proto_decode(const uint8_t *frame, size_t frame_len,uint8_t *dev_id_out, uint8_t *func_out, uint16_t *seq_out,uint8_t *payload_out, size_t payload_cap,size_t *payload_len_out);
+
 #endif /* PROTO_H */
