@@ -138,8 +138,7 @@ int proto_decode(const uint8_t *frame, size_t frame_len,uint8_t *dev_id_out, uin
      *   两者不等 → return -1
      */
     uint16_t crc_calc = crc16_modbus(logic, logic_len - 2);
-    uint16_t crc_recv = (uint16_t)((uint16_t)logic[logic_len - 2] << 8)
-                      | (uint16_t)logic[logic_len - 1];
+    uint16_t crc_recv = (uint16_t)((uint16_t)logic[logic_len - 2] << 8) | (uint16_t)logic[logic_len - 1];
     if (crc_calc != crc_recv) {
         return -1;
     }
@@ -147,7 +146,7 @@ int proto_decode(const uint8_t *frame, size_t frame_len,uint8_t *dev_id_out, uin
     /* 第 5 步：算载荷长度并拷贝
      *   payload_len = logic_len - 1 - PROTO_LEN_FIXED
      *   payload_len > payload_cap → return -1
-     *   载荷字节从 logic[6] 开始（LEN/DEV/FUNC/SEQ 共 6 字节），拷 payload_len 个
+     *   载荷字节从 logic[5] 开始（LEN 1 + DEV_ID 1 + FUNC 1 + SEQ 2 = 5 字节），拷 payload_len 个
      *   *payload_len_out = payload_len
      */
     size_t payload_len = logic_len - 1 - PROTO_LEN_FIXED;   /* = logic_len - 7 */
