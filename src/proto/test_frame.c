@@ -11,8 +11,7 @@ static void show_frame(const uint8_t *frame, size_t flen)
     uint16_t seq = 0;
     size_t plen = 0;
     int rc = proto_decode(frame, flen, &dev, &func, &seq, payload, sizeof payload, &plen);
-    printf("    第 %d 帧 len=%2zu decode=%s dev=%02x seq=%04x plen=%zu\n",
-           ++frames_out, flen, (rc == 0 ? "OK" : "FAIL"), dev, seq, plen);
+    printf("    第 %d 帧 len=%2zu decode=%s dev=%02x seq=%04x plen=%zu\n",++frames_out, flen, (rc == 0 ? "OK" : "FAIL"), dev, seq, plen);
 }
 
 /* 把一段字节逐个喂进去，统计切出的帧数 */
@@ -66,22 +65,25 @@ int main(void)
     printf("    → 共切出 %d 帧（预期 2） 残留 len=%zu（预期 %zu）\n\n",
            frames_out, P.len, n3 / 2);
 
-    /* 场景 4：空帧（连续两个 0x7E）不应被当成一帧 */
-    printf("场景4 连续两个0x7E（空帧）\n");
+    /* 场景 4：空帧不是一帧；第二个 0x7E 要留作下一帧的帧头 */
+    printf("场景4 空帧 + 第二个0x7E留作帧头\n");
     frame_parser_init(&P); frames_out = 0;
     {
-        uint8_t empty[] = {0x7E, 0x7E, 0x7E, 0x11, 0x22, 0x7E, 0x7E};
-        feed(empty, sizeof empty);
+        uint8_t two[] = {0x7E, 0x7E};
+        feed(two, sizeof two);
     }
-    printf("    → 共切出 %d 帧（预期 0：内容都不足一帧）\n\n", frames_out);
+    printf("    → 空帧对：切出 %d 帧（预期 0），残留 len=%zu（预期 1）\n",frames_out, P.len);
+    feed(f1, n1);
+    printf("    → 接着喂完整帧：累计切出 %d 帧（预期 1）\n\n", frames_out);
 
-    /* 场景 5：超长无帧尾，应丢弃并重新同步，随后仍能正常切帧 */
-    printf("场景5 超长帧后紧跟一个正常帧\n");
+    /* 场景 5：有帧头但一直等不到帧尾 → 超长丢弃并重新同步，之后的正常帧仍能切出 */
+    printf("场景5 超长帧（有帧头、无帧尾）后紧跟一个正常帧\n");
     frame_parser_init(&P); frames_out = 0;
     memset(stream, 0xAA, 600);
+    stream[0] = 0x7E;                       /* 有帧头，之后 599 字节都不是帧尾 */
     memcpy(stream + 600, f1, n1);
     feed(stream, 600 + n1);
-    printf("    → 共切出 %d 帧（预期 1） 丢弃计数=%zu（预期 1）\n", frames_out, P.stat_discarded);
+    printf("    → 共切出 %d 帧（预期 1） 丢弃计数=%zu（预期 1）\n",frames_out, P.stat_discarded);
 
     return 0;
 }
