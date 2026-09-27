@@ -10,11 +10,12 @@ int main(void)
         printf("log_init failed\n");
         return 1;
     }
-
-    log_write(LOG_DEBUG, "this line should DISAPPEAR");
-    log_write(LOG_INFO,  "hello, gateway");
-    log_write(LOG_WARN,  "crc mismatch, frame dropped");
-    log_write(LOG_ERROR, "something bad");
+    
+    /* 每条都加上 __FILE__ 和 __LINE__ 两个参数，插在等级后面 */
+    log_write(LOG_DEBUG, __FILE__, __LINE__, "this line should DISAPPEAR");
+    log_write(LOG_INFO,  __FILE__, __LINE__, "hello, gateway");
+    log_write(LOG_WARN,  __FILE__, __LINE__, "crc mismatch, frame dropped");
+    log_write(LOG_ERROR, __FILE__, __LINE__, "something bad");
     log_close();
     return 0;
 }

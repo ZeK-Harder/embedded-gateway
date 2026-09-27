@@ -30,9 +30,12 @@ int log_init(const char *path, log_level_t min_level);
  * 程序正常退出前必须调用它，否则最后几行会丢。 */
 void log_close(void);
 
-/* 最朴素的写：原样把 msg 写进日志文件（自己会补换行）。
- * 注意：这一步故意做得很弱——只能写一个完整字符串，不能带 %d %s。
- * 第一个参数换成等级。调用方现在必须"声明这条日志多重"。 */
-void log_write(log_level_t lv, const char *msg);
+/* 参数说明：
+ *   lv    —— 等级
+ *   file  —— 源文件名（由调用方传 __FILE__）
+ *   line  —— 行号（由调用方传 __LINE__）
+ *   msg   —— 消息
+ * 警告：这是一次接口变更，所有调用点必须同步修改，否则编译不过。 */
+void log_write(log_level_t lv, const char *file, int line, const char *msg);
 
 #endif /* LOG_H */
