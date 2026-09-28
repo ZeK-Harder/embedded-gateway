@@ -7,7 +7,7 @@
 static FILE *g_fp = NULL;     /* 当前日志文件的那张"卡" */
 
 /* 新加的模块状态：门槛。默认最松（全部记录），init 时再被覆盖 */
-static log_level_t g_min = LOG_DEBUG;
+static log_level_t g_min = LOG_LV_DEBUG;
 /* 等级名映射表：下标必须与 log.h 里枚举的顺序完全一致 */
 static const char *LEVEL_NAMES[] = { "DEBUG", "INFO", "WARN", "ERROR" };
 
