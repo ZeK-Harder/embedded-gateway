@@ -2,7 +2,7 @@
  * 风格和 proto 的 test_*.c 一致：自己写 main，不用 CUnit（阶段二再迁）
  */
 #include "log.h"
-#include<stdio.h>
+#include <stdio.h>
 int main(void)
 {
     /* 注意第二个参数改名了：LOG_INFO → LOG_LV_INFO */

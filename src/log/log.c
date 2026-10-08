@@ -1,6 +1,6 @@
 /* src/log/log.c —— 分级日志模块的实现 */
 #include "log.h"
-#include <stdio.h>      /* fopen / fclose / fputs / perror 都在这 */
+#include <stdio.h>      /* fopen / fclose / perror 都在这 */
 #include <time.h>       /* time / localtime_r / strftime */
 
 /* 模块私有状态：static 表示"只在本文件可见"，别的 .c 文件看不到它 */
