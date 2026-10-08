@@ -2,6 +2,7 @@
 #include "log.h"
 #include <stdio.h>      /* fopen / fclose / perror 都在这 */
 #include <time.h>       /* time / localtime_r / strftime */
+#include <stdarg.h>     /* va_list / va_start / va_end */
 
 /* 模块私有状态：static 表示"只在本文件可见"，别的 .c 文件看不到它 */
 static FILE *g_fp = NULL;     /* 当前日志文件的那张"卡" */
@@ -28,15 +29,18 @@ static const char *level_name(log_level_t lv)
     return LEVEL_NAMES[lv];      /* 枚举值当数组下标，直接查表 */
 }
 
-void log_write(log_level_t lv, const char *file, int line, const char *msg)
+void log_write(log_level_t lv, const char *file, int line, const char *fmt, ...)
 {
+    /* 三个防御 return：注意第三个现在判的是 fmt
+     * （判断逻辑不变，只是参数改名了） */
+
     if (lv < g_min) {
         return;
     }
     if (g_fp == NULL) {
         return;
     }
-    if (msg == NULL) {
+    if (fmt == NULL) {
         return;
     }
     time_t now = time(NULL);
@@ -46,7 +50,18 @@ void log_write(log_level_t lv, const char *file, int line, const char *msg)
     }
     char ts[32];
     strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tmv);
-    fprintf(g_fp,"%s [%s] %s:%d %s\n", ts, level_name(lv), file, line, msg);
+
+    /* 第 1 段：写前缀（时间是 ts，等级是 lv，来源是 file:line） */
+    fprintf(g_fp, "%s [%s] %s:%d ", ts, level_name(lv), file, line);
+
+    /* 第 2 段：写正文——调用方给的模板 + 参数 */
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(g_fp, fmt, ap);
+    va_end(ap);
+
+    /* 第 3 段：补换行 */
+    fputs("\n", g_fp);
 }
 
 void log_close(void)

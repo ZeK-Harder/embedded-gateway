@@ -32,18 +32,15 @@ void log_close(void);
  *   lv    —— 等级
  *   file  —— 源文件名（由调用方传 __FILE__）
  *   line  —— 行号（由调用方传 __LINE__）
- *   msg   —— 消息
- * 警告：这是一次接口变更，所有调用点必须同步修改，否则编译不过。 */
-void log_write(log_level_t lv, const char *file, int line, const char *msg);
+ *   fmt   —— 格式串，和 printf 一个规矩，如 "dev %d timeout"
+ *   ...   —— 与 fmt 里的 % 一一对应的可变参数
+ * 注意：参数名从 msg 改成了 fmt —— 它现在是"待格式化的模板"，不再是"一个现成的字符串"。名字要跟着语义走。
+ */
+void log_write(log_level_t lv, const char *file, int line, const char *fmt, ...);
 
-/* ---------- 业务代码只用这四个宏，不要直接调 log_write ---------- */
-/* 样板：LOG_DEBUG("hi") 会被原地替换成
- *   log_write(LOG_LV_DEBUG, __FILE__, __LINE__, "hi")
- * 所以调用点再也不用手敲 __FILE__ / __LINE__ 这两坨。
- * 行尾没有分号（分号由调用方写）。 */
-#define LOG_DEBUG(msg)  log_write(LOG_LV_DEBUG, __FILE__, __LINE__, msg)
-#define LOG_INFO(msg)   log_write(LOG_LV_INFO, __FILE__, __LINE__, msg)
-#define LOG_WARN(msg)   log_write(LOG_LV_WARN, __FILE__, __LINE__, msg)
-#define LOG_ERROR(msg)  log_write(LOG_LV_ERROR, __FILE__, __LINE__, msg)
+#define LOG_DEBUG(fmt, ...)  log_write(LOG_LV_DEBUG, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define LOG_INFO(fmt, ...)   log_write(LOG_LV_INFO, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define LOG_WARN(fmt, ...)   log_write(LOG_LV_WARN, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define LOG_ERROR(fmt, ...)  log_write(LOG_LV_ERROR, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 
 #endif /* LOG_H */

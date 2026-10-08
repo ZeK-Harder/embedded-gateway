@@ -10,10 +10,12 @@ int main(void)
         printf("log_init failed\n");
         return 1;
     }
-    LOG_DEBUG("this line should DISAPPEAR");
+
+    LOG_DEBUG("this line should DISAPPEAR");      /* 保留：它同时是"无变参"的测试 */
     LOG_INFO ("hello, gateway");
     LOG_WARN ("crc mismatch, frame dropped");
     LOG_ERROR("something bad");
+    LOG_INFO("dev %d connected, fd = %d", 7, 12);
     log_close();
     return 0;
 }
