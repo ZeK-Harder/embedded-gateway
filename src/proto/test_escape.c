@@ -11,32 +11,47 @@ static void dump(const char *tag, const uint8_t *buf, size_t len)
     printf("\n");
 }
 
-int main(void)
+static int test_roundtrip(void)
 {
-    /* 用例 1：往返一致性（和你 Python 版用的同一组数据） */
     uint8_t in[] = {0x11, 0x7E, 0x22, 0x7D, 0x33};
     uint8_t out[64], back[64];
-
     size_t n = proto_escape(in, sizeof in, out, sizeof out);
     dump("原始", in, sizeof in);
     dump("转义后", out, n);
-
     size_t m = proto_unescape(out, n, back, sizeof back);
     dump("还原后", back, m);
-    printf("往返一致: %s\n",
-           (m == sizeof in && memcmp(in, back, m) == 0) ? "是" : "否");
+    int pass = (m == sizeof in && memcmp(in, back, m) == 0);
+    printf("往返一致: %s\n", pass ? "是 PASS" : "否 FAIL");
+    return pass ? 0 : 1;
+}
 
-    /* 用例 2：100 个 0x7E，线上应为 200 字节 */
+static int test_many_7e(void)
+{
     uint8_t many[100];
     uint8_t big[256];
     memset(many, 0x7E, sizeof many);
-    printf("100 个 0x7E -> 线上 %zu 字节（预期 200）\n",
-           proto_escape(many, sizeof many, big, sizeof big));
+    size_t got = proto_escape(many, sizeof many, big, sizeof big);
+    int pass = (got == 200);
+    printf("100 个 0x7E -> 线上 %zu 字节（预期 200）  %s\n", got, pass ? "PASS" : "FAIL");
+    return pass ? 0 : 1;
+}
 
-    /* 用例 3：非法输入 —— 末尾孤立的 0x7D，应返回 0 */
+static int test_orphan_7d(void)
+{
     uint8_t bad[] = {0x11, 0x7D};
-    printf("末尾孤立 0x7D -> 返回 %zu（预期 0）\n",
-           proto_unescape(bad, sizeof bad, back, sizeof back));
+    uint8_t back[64];
+    size_t got = proto_unescape(bad, sizeof bad, back, sizeof back);
+    int pass = (got == 0);
+    printf("末尾孤立 0x7D -> 返回 %zu（预期 0）  %s\n", got, pass ? "PASS" : "FAIL");
+    return pass ? 0 : 1;
+}
 
-    return 0;
+int main(void)
+{
+    int failed = 0;
+    failed += test_roundtrip();
+    failed += test_many_7e();
+    failed += test_orphan_7d();
+    printf("\n共 %d 条用例失败\n", failed);
+    return failed;
 }
