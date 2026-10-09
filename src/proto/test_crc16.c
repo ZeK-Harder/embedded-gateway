@@ -1,22 +1,40 @@
 #include <stdio.h>
 #include "crc16.h"
 
-int main(void)
+static int test_vector(void)
 {
-    /* 用例 1：标准校验向量，应得 0x4B37 —— 与 Python 版、阶段〇自测结果一致 */
     const uint8_t vector[] = "123456789";
-    printf("\"123456789\" -> 0x%04X（预期 0x4B37）\n", crc16_modbus(vector, 9));
+    uint16_t got = crc16_modbus(vector, 9);
+    int pass = (got == 0x4B37);
+    printf("\"123456789\" -> 0x%04X（预期 0x4B37）  %s\n", got, pass ? "PASS" : "FAIL");
+    return pass ? 0 : 1;
+}
 
-    /* 用例 2：空数据返回初值 */
-    printf("空数据      -> 0x%04X（预期 0xFFFF）\n", crc16_modbus(NULL, 0));
+static int test_empty(void)
+{
+    uint16_t got = crc16_modbus(NULL, 0);
+    int pass = (got == 0xFFFF);
+    printf("空数据      -> 0x%04X（预期 0xFFFF）  %s\n", got, pass ? "PASS" : "FAIL");
+    return pass ? 0 : 1;
+}
 
-    /* 用例 3：改动 1 个 bit 必须导致校验值变化（检出能力） */
+static int test_bitflip(void)
+{
     uint8_t frame[] = {0x11, 0x22, 0x33, 0x44};
     uint16_t before = crc16_modbus(frame, sizeof frame);
-    frame[2] = 0x32;                                  /* 0x33 -> 0x32，差 1 bit */
+    frame[2] = 0x32;
     uint16_t after = crc16_modbus(frame, sizeof frame);
-    printf("改 1 bit: 0x%04X -> 0x%04X -> %s\n",
-           before, after, (before != after) ? "检出" : "未检出");
+    int pass = (before != after);
+    printf("改 1 bit: 0x%04X -> 0x%04X -> %s\n", before, after, pass ? "检出 PASS" : "未检出 FAIL");
+    return pass ? 0 : 1;
+}
 
-    return 0;
+int main(void)
+{
+    int failed = 0;
+    failed += test_vector();
+    failed += test_empty();
+    failed += test_bitflip();
+    printf("\n共 %d 条用例失败\n", failed);
+    return failed;
 }
