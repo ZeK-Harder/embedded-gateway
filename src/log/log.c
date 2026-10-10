@@ -3,10 +3,11 @@
 #include <stdio.h>      /* fopen / fclose / perror 都在这 */
 #include <time.h>       /* time / localtime_r / strftime */
 #include <stdarg.h>     /* va_list / va_start / va_end */
+#include <pthread.h>
 
 /* 模块私有状态：static 表示"只在本文件可见"，别的 .c 文件看不到它 */
 static FILE *g_fp = NULL;     /* 当前日志文件的那张"卡" */
-
+static pthread_mutex_t g_log_mtx = PTHREAD_MUTEX_INITIALIZER;
 /* 新加的模块状态：门槛。默认最松（全部记录），init 时再被覆盖 */
 static log_level_t g_min = LOG_LV_DEBUG;
 /* 等级名映射表：下标必须与 log.h 里枚举的顺序完全一致 */
@@ -29,40 +30,44 @@ static const char *level_name(log_level_t lv)
     return LEVEL_NAMES[lv];      /* 枚举值当数组下标，直接查表 */
 }
 
-void log_write(log_level_t lv, const char *file, int line, const char *fmt, ...)
+void log_write(log_level_t lv, const char *file, int line,const char *fmt, ...)
 {
-    /* 三个防御 return：注意第三个现在判的是 fmt
-     * （判断逻辑不变，只是参数改名了） */
-
     if (lv < g_min) {
-        return;
+        goto out;                 /* 没拿锁，直接走出口 */
     }
     if (g_fp == NULL) {
-        return;
+        goto out;                 /* 没拿锁，直接走出口 */
     }
     if (fmt == NULL) {
-        return;
+        goto out;                 /* 没拿锁，直接走出口 */
     }
+
+    pthread_mutex_lock(&g_log_mtx);
+
     time_t now = time(NULL);
     struct tm tmv;
     if (localtime_r(&now, &tmv) == NULL) {
-        return;
+        goto out_unlock;          /* 已拿锁：必须先解锁 */
     }
+
     char ts[32];
     strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tmv);
 
-    /* 第 1 段：写前缀（时间是 ts，等级是 lv，来源是 file:line） */
     fprintf(g_fp, "%s [%s] %s:%d ", ts, level_name(lv), file, line);
 
-    /* 第 2 段：写正文——调用方给的模板 + 参数 */
     va_list ap;
     va_start(ap, fmt);
     vfprintf(g_fp, fmt, ap);
     va_end(ap);
 
-    /* 第 3 段：补换行 */
     fputs("\n", g_fp);
+
+out_unlock:                          /* 所有"拿过锁"的路径都汇到这里 */
+    pthread_mutex_unlock(&g_log_mtx);
+out:                                 /* 函数唯一的真正出口 */
+    return;
 }
+
 
 void log_close(void)
 {
