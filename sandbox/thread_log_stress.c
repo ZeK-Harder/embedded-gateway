@@ -7,7 +7,8 @@
  * 构建（在仓库根目录执行）：
  *   gcc -Wall -Wextra -std=gnu11 -pthread -Isrc/log \
  *       src/log/log.c sandbox/thread_log_stress.c -o bin/thread_log_stress
- *
+ * 本文件不在 Makefile 中，make 不会重建它 —— 改动本文件后必须重新执行下面这条 gcc，否则跑的是旧二进制（旧二进制里嵌的调用点行号也是旧的）。
+ 
  * 运行与判定：
  *   cd bin && ./thread_log_stress && cd ..
  *   echo "总行数=$(wc -l < bin/thread.log)  期望=$((4*3000))"
