@@ -8,7 +8,7 @@
  *   gcc -Wall -Wextra -std=gnu11 -pthread -Isrc/log \
  *       src/log/log.c sandbox/thread_log_stress.c -o bin/thread_log_stress
  * 本文件不在 Makefile 中，make 不会重建它 —— 改动本文件后必须重新执行下面这条 gcc，否则跑的是旧二进制（旧二进制里嵌的调用点行号也是旧的）。
- 
+ *
  * 运行与判定：
  *   cd bin && ./thread_log_stress && cd ..
  *   echo "总行数=$(wc -l < bin/thread.log)  期望=$((4*3000))"
@@ -18,9 +18,7 @@
  * 甚至随二进制重编而漂移，一旦改动就得同步维护、极易失效；应只锚
  * 模块名、函数名或日志正文这类稳定片段，让匹配在改文件后依然成立。
  */
-
 #include "log.h"
-
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -31,7 +29,6 @@
 static void *worker(void *arg)
 {
     long id = (long)(intptr_t)arg;
-
     for (int i = 0; i < NLOOPS; i++) {
         /* 一行里同时有前缀、变参正文和换行，正好覆盖 log_write 的三段式写入 */
         LOG_INFO("worker %ld iteration %d payload=%d", id, i, i * 7);
@@ -41,6 +38,9 @@ static void *worker(void *arg)
 
 int main(void)
 {
+    /* "thread.log" 是相对路径：C 标准库按程序启动时的当前工作目录解析，
+     * 不是相对源码位置、也不是相对可执行文件位置。所以必须先 cd bin 再运行，
+     * 否则日志会落在你执行命令时所在的目录，而不是 bin/thread.log。 */
     if (log_init("thread.log", LOG_LV_INFO) != 0) {
         printf("log_init failed\n");
         return 1;
@@ -54,13 +54,13 @@ int main(void)
             return 1;
         }
     }
+
     for (int i = 0; i < NTHREADS; i++) {
         pthread_join(t[i], NULL);
     }
 
     log_close();
-
     /* 日志行数应该正好是 NTHREADS * NLOOPS。少行也算失败（说明有行被覆盖或吞掉）。 */
-    printf("done: 期望 %d 行，去 bin/thread.log 数一下\n", NTHREADS * NLOOPS);
+    printf("done: 期望 %d 行，日志写在当前目录下的 thread.log\n", NTHREADS * NLOOPS);
     return 0;
 }
