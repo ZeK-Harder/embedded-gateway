@@ -50,6 +50,19 @@ static int feed(const uint8_t *data, size_t len)
     return cnt;
 }
 
+static void test_small_out_cap(void)
+{
+    uint8_t small_buf[513];
+    size_t flen;
+    frame_parser_init(&P);
+    frames_out = 0;
+    exp_count = 0;
+    exp_idx = 0;
+    int rc = frame_parser_feed(&P, 0x7E, small_buf, sizeof small_buf, &flen);
+    printf("场景6 输出缓冲区out_cap <514，预期返回rc=-2\n");
+    if (rc != -2) failed++;
+}
+
 int main(void)
 {
     uint8_t f1[600], f2[600], f3[600], stream[2000];
@@ -126,5 +139,8 @@ int main(void)
     feed(stream, 600 + n1);
     printf("    → 共切出 %d 帧（预期 1） 丢弃计数=%zu（预期 1）\n",frames_out, P.stat_discarded);
     if (frames_out != 1 || P.stat_discarded != 1) failed++;
+
+    printf("场景6 输出缓冲区out_cap <514，预期返回rc=-2\n");
+    test_small_out_cap();
     return failed;
 }
