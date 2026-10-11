@@ -1,0 +1,112 @@
+# Linux 系统编程常用函数速查
+对应手册命令：man 2 socket / man 2 bind / man 2 listen / man 2 accept / man 2 recv / man 2 send / man 3 memset / man 3 sleep
+
+-----------------------------------------------
+## 1. socket() —— 创建通信端点
+调用形态：
+int socket(int domain, int type, int protocol);
+
+参数说明：
+- domain：通信协议族，常用 AF_INET(IPv4) / AF_INET6(IPv6) / AF_UNIX(本地套接字)
+- type：套接字类型，常用 SOCK_STREAM(TCP流式) / SOCK_DGRAM(UDP数据报) / SOCK_RAW(原始套接字)
+- protocol：指定具体协议，通常传0由系统自动选择默认协议
+
+返回值：
+- 成功：返回非负的套接字文件描述符
+- 失败：返回-1，errno设为对应错误码
+
+-----------------------------------------------
+## 2. bind() —— 绑定本地IP和端口到套接字
+调用形态：
+int bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
+
+参数说明：
+- sockfd：socket()返回的待绑定套接字
+- addr：指向要绑定的本地地址结构体（包含IP+端口）
+- addrlen：addr结构体的实际长度
+
+返回值：
+- 成功：返回0
+- 失败：返回-1，常见错误：端口被占用、权限不足
+
+-----------------------------------------------
+## 3. listen() —— 把套接字转为被动监听模式
+调用形态：
+int listen(int sockfd, int backlog);
+
+参数说明：
+- sockfd：已经bind完成的套接字
+- backlog：内核中待accept连接队列的最大长度
+
+返回值：
+- 成功：返回0
+- 失败：返回-1
+
+-----------------------------------------------
+## 4. accept() —— 等待取出一个已完成的客户端连接
+调用形态：
+int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
+
+参数说明：
+- sockfd：已经listen的监听套接字
+- addr：出参，用来存客户端地址信息（传NULL表示不关心）
+- addrlen：入参传addr缓冲区容量，出参返回实际填充的地址长度
+
+返回值：
+- 成功：返回非负的已连接套接字，后续读写数据都用这个fd
+- 失败：返回-1
+
+-----------------------------------------------
+## 5. recv() —— 从已连接套接字接收数据
+调用形态：
+ssize_t recv(int sockfd, void *buf, size_t len, int flags);
+
+参数说明：
+- sockfd：已连接的套接字
+- buf：接收数据的缓冲区首地址
+- len：缓冲区最大可容纳字节数
+- flags：行为标志，常用0(阻塞接收) / MSG_PEEK(偷看不清内核缓存) / MSG_DONTWAIT(非阻塞)
+
+返回值：
+- >0：实际接收到的字节数
+- =0：对端已正常关闭连接
+- <0：出错返回-1
+
+-----------------------------------------------
+## 6. send() —— 向已连接套接字发送数据
+调用形态：
+ssize_t send(int sockfd, const void *buf, size_t len, int flags);
+
+参数说明：
+- sockfd：已连接的套接字
+- buf：待发送数据的缓冲区首地址
+- len：想要发送的字节数
+- flags：行为标志，常用0(阻塞发送) / MSG_DONTWAIT(非阻塞)
+
+返回值：
+- >0：实际成功发送的字节数（可能小于要求的len，需要循环发送）
+- <0：出错返回-1
+
+-----------------------------------------------
+## 7. memset() —— 内存块批量填充
+调用形态：
+void *memset(void *s, int c, size_t n);
+
+参数说明：
+- s：待填充的内存块首地址
+- c：要填充的字节值（自动转unsigned char逐字节填充）
+- n：需要填充的字节总长度
+
+返回值：固定返回传入的s指针，无错误返回
+
+-----------------------------------------------
+## 8. sleep() —— 进程休眠指定秒数
+调用形态：
+unsigned int sleep(unsigned int seconds);
+
+参数说明：
+- seconds：想要休眠的秒数
+
+返回值：
+- =0：完整睡满指定时长
+- >0：被信号提前唤醒，返回剩余未睡的秒数
