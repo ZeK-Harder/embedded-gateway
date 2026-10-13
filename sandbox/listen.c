@@ -9,7 +9,13 @@
 
 int main(void) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);       // 成功→fd(≥3)；失败→-1
-    printf("socket 返回 %d\n", fd);
+    if(fd<0){
+        perror("socket");
+        exit(EXIT_FAILURE);
+    }
+    else{
+        printf("socket 返回 %d\n", fd);
+    }
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));                 // 先清零，别跳过
@@ -27,19 +33,31 @@ int main(void) {
     }
 
     int r2 = listen(fd, 8);                                     // 成功→0
-    printf("listen 返回 %d\n", r2);
+    if(r2<0){
+        perror("listen");
+        exit(EXIT_FAILURE);
+    }
+    else{
+        printf("listen 返回 %d\n", r2);
+    }
+
     char buf[1024];
 
     while(1){
         int cfd = accept(fd, NULL, NULL);
-        printf("accept 返回 %d\n", cfd);
-
-        int n = recv(cfd, buf, sizeof(buf), 0);
-        if(n>0){
-            printf("%.*s\n", n, buf);
+        if(cfd<0){
+            perror("accept");
+            sleep(1);
         }
+        else{
+            printf("accept 返回 %d\n", cfd);
+            int n = recv(cfd, buf, sizeof(buf), 0);
+            if(n>0){
+                printf("%.*s\n", n, buf);
+            }
 
-        close(cfd);
+            close(cfd);
+        }
     }
     
     printf("在监听 8090\n");
