@@ -28,7 +28,8 @@ int main(void) {
 
     int r = bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr));  // 把这个端点"钉"在 8090 上
     if (r < 0){
-        perror("bind"); exit(EXIT_FAILURE);
+        perror("bind");
+        exit(EXIT_FAILURE);
     }   // 端口被占就死（你实测过退出码 1）
     else{
         printf("bind 返回 %d\n", r);                    // 成功 = 0
@@ -36,7 +37,8 @@ int main(void) {
 
     int r2 = listen(listen_fd, 8);        // 从"端点"变成"门"：开始接受连接，排队上限 8
     if (r2 < 0) {
-        perror("listen"); exit(EXIT_FAILURE);
+        perror("listen");
+        exit(EXIT_FAILURE);
     }
     else{
         printf("listen 返回 %d\n", r2);
@@ -56,10 +58,25 @@ int main(void) {
     while (1) {
         int n = epoll_wait(epfd, evs, 8, -1);   // 睡在这等电话；-1 = 一直等，不超时
         for (int i = 0; i < n; i++) {           // 只处理前 n 条（后面的格子是旧数据）
-            if (evs[i].data.fd == listen_fd) {  // 小票上的号 == 门 → 说明"有人来连"
+            int fd = evs[i].data.fd;        // 小票上的号（便条）
+            if (fd == listen_fd) {  // 小票上的号 == 门 → 说明"有人来连"
                 int conn_fd = accept(listen_fd, NULL, NULL);   // 把客人请进来，拿到他专用的通道 fd
                 printf("新连接 conn_fd=%d\n", conn_fd);         // 屏幕上那行 5
-                close(conn_fd);                 // 这一步先立刻还回去（不读数据）
+                ev.events = EPOLLIN;
+                ev.data.fd = conn_fd;
+                epoll_ctl(epfd, EPOLL_CTL_ADD, conn_fd, &ev);
+                printf("已登记 conn_fd=%d\n", conn_fd);
+            }
+            else {
+                char buf[1024];
+                int m = recv(fd, buf, sizeof buf, 0);
+                if (m > 0) {
+                    printf("conn_fd=%d 说: %.*s\n", fd, m, buf);
+                } else if (m == 0) {
+                    printf("conn_fd=%d 断开了\n", fd);
+                    epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+                    close(fd);
+                }
             }
         }
     }
