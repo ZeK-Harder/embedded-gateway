@@ -16,6 +16,8 @@ struct conn {
     int fd;
     int total;          /* 这条连接累计读到多少字节 */
     int used;           /* 槽位是否被占用：0 = 空槽 */
+    unsigned char rbuf[4096];   /* 这条连接攒下的原始字节（半成品柜） */
+    size_t rlen;         /* 柜台里现在有多少字节 */
 };
 
 static struct conn conns[MAX_CONN];
@@ -28,6 +30,7 @@ static struct conn *conn_alloc(void)
             conns[i].used  = 1;
             conns[i].fd    = -1;
             conns[i].total = 0;
+            conns[i].rlen  = 0;
             return &conns[i];
         }
     return NULL;
@@ -148,14 +151,21 @@ int main(void) {
                 printf("已登记 conn_fd=%d\n", conn_fd);
 
             } else {                          // 已连接的客人可读
-                char buf[1024];
                 ssize_t m;
                 int fd = c->fd;
                 while (1) {
-                    m = recv(fd, buf, sizeof buf, 0);
-                    if (m > 0) {               // 有数据
-                        c->total += (int)m;  // 累加（已在界内）
-                        printf("conn_fd=%d total=%d\n", c->fd, c->total);
+                    if (c->rlen == sizeof c->rbuf) {
+                        if (epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL) < 0 && errno != ENOENT)
+                            perror("epoll_ctl DEL");
+                        conn_free(c);
+                        close(fd);
+                        break;
+                    }
+                    m = recv(fd, c->rbuf + c->rlen, sizeof c->rbuf - c->rlen, 0);
+                    if (m > 0) {
+                        c->rlen  += (size_t)m;
+                        c->total += (int)m;
+                        printf("conn_fd=%d total=%d rlen=%zu\n", c->fd, c->total, c->rlen);
                         continue;
                     }
                     if (m == 0) {              // 对端正常关闭（FIN）
@@ -179,7 +189,6 @@ int main(void) {
                     // 删除 —— 失败只记一行，流程不变（ENOENT 是正常的）
                     if (epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL) < 0 && errno != ENOENT)
                         perror("epoll_ctl DEL");
-
                     conn_free(c);
                     close(fd);
                     break;
