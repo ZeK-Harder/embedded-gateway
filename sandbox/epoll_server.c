@@ -10,9 +10,38 @@
 #include <sys/epoll.h>     // epoll_create1 / epoll_ctl / epoll_wait
 #include <fcntl.h>         // fcntl, F_GETFL, F_SETFL, O_NONBLOCK
 
-#define MAX_CONN 1024      // total 数组容量，下标上限
+#define MAX_CONN 1024
+
+struct conn {
+    int fd;
+    int total;          /* 这条连接累计读到多少字节 */
+    int used;           /* 槽位是否被占用：0 = 空槽 */
+};
+
+static struct conn conns[MAX_CONN];
+
+/* 从池子里拿一个空槽；拿不到返回 NULL */
+static struct conn *conn_alloc(void)
+{
+    for (int i = 0; i < MAX_CONN; i++)
+        if (!conns[i].used) {
+            conns[i].used  = 1;
+            conns[i].fd    = -1;
+            conns[i].total = 0;
+            return &conns[i];
+        }
+    return NULL;
+}
+
+static void conn_free(struct conn *c)
+{
+    c->used = 0;
+}
 
 int main(void) {
+
+    setvbuf(stdout, NULL, _IOLBF, 0);   //输出重定向到文件时否则全缓冲，脚本读不到
+
     // ---------- 造门 ----------
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd < 0) {
@@ -53,11 +82,8 @@ int main(void) {
 
     struct epoll_event ev;
     ev.events   = EPOLLIN;
-    ev.data.fd  = listen_fd;
+    ev.data.ptr = NULL;
     epoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &ev);
-
-    // 累计字节数按 fd 存，放在循环外，跨多次事件不归零
-    int total[MAX_CONN] = {0};
 
     // ---------- 事件循环 ----------
     struct epoll_event evs[8];
@@ -70,19 +96,12 @@ int main(void) {
         }
 
         for (int i = 0; i < n; i++) {
-            int fd = evs[i].data.fd;
+            struct conn *c = evs[i].data.ptr;
 
-            if (fd == listen_fd) {            // 有人来连
+            if (c == NULL) {            // 有人来连
                 int conn_fd = accept(listen_fd, NULL, NULL);
                 if (conn_fd < 0) {
                     perror("accept");
-                    continue;
-                }
-
-                // 边界检查：fd 来自外部，超出 total 容量就不登记，直接关掉
-                if (conn_fd >= MAX_CONN) {
-                    printf("conn_fd=%d 超出容量 %d，关闭\n", conn_fd, MAX_CONN);
-                    close(conn_fd);
                     continue;
                 }
 
@@ -100,27 +119,33 @@ int main(void) {
                 }
 
                 printf("新连接 conn_fd=%d (非阻塞)\n", conn_fd);
-                total[conn_fd] = 0;           // 新连接进来，累计先清零（已在界内）
+                c = conn_alloc();
+                if (!c) {
+                    close(conn_fd);
+                    continue;
+                }
+                c->fd = conn_fd;
 
                 ev.events  = EPOLLIN;
-                ev.data.fd  = conn_fd;
+                ev.data.ptr = c;
                 epoll_ctl(epfd, EPOLL_CTL_ADD, conn_fd, &ev);
                 printf("已登记 conn_fd=%d\n", conn_fd);
 
             } else {                          // 已连接的客人可读
                 char buf[1024];
                 ssize_t m;
+                int fd = c->fd;
                 while (1) {
                     m = recv(fd, buf, sizeof buf, 0);
                     if (m > 0) {               // 有数据
-                        total[fd] += (int)m;  // 累加（已在界内）
-                        printf("conn_fd=%d 读到 %zd 字节，累计 %d: %.*s\n",
-                               fd, m, total[fd], (int)m, buf);
+                        c->total += (int)m;  // 累加（已在界内）
+                        printf("conn_fd=%d total=%d\n", c->fd, c->total);
                         continue;
                     }
                     if (m == 0) {              // 对端正常关闭（FIN）
-                        printf("conn_fd=%d 断开了，累计 %d 字节\n", fd, total[fd]);
+                        printf("conn_fd=%d closed total=%d\n", c->fd, c->total);
                         epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+                        conn_free(c);
                         close(fd);
                         break;
                     }
@@ -133,6 +158,7 @@ int main(void) {
                     }
                     perror("recv");
                     epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+                    conn_free(c);
                     close(fd);
                     break;
                 }
