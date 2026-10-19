@@ -89,7 +89,11 @@ int main(void) {
     struct epoll_event ev;
     ev.events   = EPOLLIN;
     ev.data.ptr = NULL;
-    epoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &ev);
+    // 门登记 —— 启动阶段失败 = 这程序废了，直接死（和 bind 一致）
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &ev) < 0) {
+        perror("epoll_ctl ADD 门");
+        exit(EXIT_FAILURE);
+    }
 
     // ---------- 事件循环 ----------
     struct epoll_event evs[8];
@@ -134,7 +138,13 @@ int main(void) {
 
                 ev.events  = EPOLLIN;
                 ev.data.ptr = c;
-                epoll_ctl(epfd, EPOLL_CTL_ADD, conn_fd, &ev);
+                // 新连接登记 —— 登记不上就别把这条连接留着
+                if (epoll_ctl(epfd, EPOLL_CTL_ADD, conn_fd, &ev) < 0) {
+                    perror("epoll_ctl ADD conn");
+                    conn_free(c);
+                    close(conn_fd);
+                    continue;
+                }
                 printf("已登记 conn_fd=%d\n", conn_fd);
 
             } else {                          // 已连接的客人可读
@@ -150,7 +160,10 @@ int main(void) {
                     }
                     if (m == 0) {              // 对端正常关闭（FIN）
                         printf("conn_fd=%d closed total=%d\n", c->fd, c->total);
-                        epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+                        // 删除 —— 失败只记一行，流程不变（ENOENT 是正常的）
+                        if (epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL) < 0 && errno != ENOENT)
+                            perror("epoll_ctl DEL");
+
                         conn_free(c);
                         close(fd);
                         break;
@@ -163,7 +176,10 @@ int main(void) {
                         continue;              // 被信号打断，重读
                     }
                     perror("recv");
-                    epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+                    // 删除 —— 失败只记一行，流程不变（ENOENT 是正常的）
+                    if (epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL) < 0 && errno != ENOENT)
+                        perror("epoll_ctl DEL");
+
                     conn_free(c);
                     close(fd);
                     break;
