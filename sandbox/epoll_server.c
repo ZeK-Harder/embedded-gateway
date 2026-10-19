@@ -51,6 +51,12 @@ int main(void) {
         printf("socket 返回 %d\n", listen_fd);
     }
 
+    int on = 1;                                     // SO_REUSEADDR 的开关值：1 = 打开
+    if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on) < 0) {
+        perror("setsockopt SO_REUSEADDR");
+        exit(EXIT_FAILURE);
+    }
+
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family      = AF_INET;
