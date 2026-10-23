@@ -9,6 +9,7 @@
 #include <stdlib.h>        // exit / EXIT_FAILURE
 #include <sys/epoll.h>     // epoll_create1 / epoll_ctl / epoll_wait
 #include <fcntl.h>         // fcntl, F_GETFL, F_SETFL, O_NONBLOCK
+#include "proto.h"
 
 #define MAX_CONN 1024
 
@@ -18,6 +19,7 @@ struct conn {
     int used;           /* 槽位是否被占用：0 = 空槽 */
     unsigned char rbuf[4096];   /* 这条连接攒下的原始字节（半成品柜） */
     size_t rlen;         /* 柜台里现在有多少字节 */
+    frame_parser_t fp;   /* 这条连接自己的切包状态机：跨 recv 的半帧住在这里 */
 };
 
 static struct conn conns[MAX_CONN];
@@ -31,6 +33,11 @@ static struct conn *conn_alloc(void)
             conns[i].fd    = -1;
             conns[i].total = 0;
             conns[i].rlen  = 0;
+            /* 清理放在唯一的"分配入口"，不放在"释放出口"：
+             * 槽位要变成某条连接的只有这一条路，放这里物理上不可能漏；
+             * 而关闭路径已经有 3 条（FIN / recv 错误 / 缓冲满），以后还会加心跳超时、写失败 --
+             * 放出口就得每条都记得补一次。 */
+            frame_parser_init(&conns[i].fp);
             return &conns[i];
         }
     return NULL;
@@ -99,6 +106,10 @@ int main(void) {
     }
 
     // ---------- 事件循环 ----------
+    /* parser 凑齐一整帧时，把这帧的线上字节拷进 frame_buf，长度写进 flen。
+     * 放在事件循环外面复用即可：半帧住在 c->fp 里，整帧只在"刚解出来那一瞬"需要一块地方。 */
+    uint8_t frame_buf[PROTO_FRAME_WIRE_MAX];   /* 514 字节 = 线上帧上限 */
+    size_t  flen = 0;
     struct epoll_event evs[8];
     while (1) {
         int n = epoll_wait(epfd, evs, 8, -1);
@@ -163,11 +174,48 @@ int main(void) {
                     }
                     m = recv(fd, c->rbuf + c->rlen, sizeof c->rbuf - c->rlen, 0);
                     if (m > 0) {
+                        /* 本次 recv 的 m 个字节落进 rbuf 的 [start, start+m)；
+                         * rlen 记"缓冲里现在一共有多少字节"，total 只用来观察累计量。 */
+                        size_t start = c->rlen;
                         c->rlen  += (size_t)m;
                         c->total += (int)m;
-                        printf("conn_fd=%d total=%d rlen=%zu\n", c->fd, c->total, c->rlen);
+
+                        /* 逐字节喂进状态机：frame_parser_feed 的接口就是"一次一个字节"。
+                         * 它内部自己攒——不够一帧返回 0；够一帧返回 1，并把这帧拷进 frame_buf。 */
+                        for (size_t bi = start; bi < c->rlen; bi++) {
+                            int rc = frame_parser_feed(&c->fp, c->rbuf[bi],frame_buf, sizeof frame_buf, &flen);
+                            if (rc == 1) {                    /* 凑齐一整帧了 */
+                                /* decode 的 4 个字段 + 1 块载荷空间，先全部给 0，
+                                 * 保证 drc 失败时打印出来的是确定值而不是垃圾 */
+                                uint8_t  dev  = 0;
+                                uint8_t  func = 0;
+                                uint16_t seq  = 0;
+                                uint8_t  payload[PROTO_PAYLOAD_MAX];  /* V1 不解释载荷，但 API 要一块地方接 */
+                                size_t   plen = 0;
+
+                                /* drc 和上面的 rc 是两个东西：
+                                 *   rc  = parser 交没交出一整帧（这里已经=1）
+                                 *   drc = 这帧对不对（帧头帧尾 / LEN 自洽 / CRC） */
+                                int drc = proto_decode(frame_buf, flen, &dev, &func,&seq, payload, sizeof payload, &plen);
+                                if (drc == 0) {
+                                    printf("frame dev=%u func=%u seq=%u plen=%zu\n",
+                                           (unsigned)dev, (unsigned)func, (unsigned)seq, plen);
+                                } else {
+                                    /* 数据坏 != 通道坏：只丢这一帧，连接和后面的帧都要继续 */
+                                    printf("drop: 解码失败 fd=%d\n", c->fd);
+                                }
+                            } else if (rc == -1) {
+                                /* 超长帧：parser 已丢弃并重新同步，接着喂后面的字节 */
+                                printf("drop: 超长帧 fd=%d\n", c->fd);
+                            }
+                        }
+                        /* 这 m 个字节"一个不漏"都喂进去了 => 半帧的保管权已在 c->fp 手里，
+                         * rbuf 不再需要留下任何字节。这一行必须写在 for 之后：
+                         * 写在前头就等于把还没喂的字节扔了。 */
+                        c->rlen = 0;
                         continue;
                     }
+
                     if (m == 0) {              // 对端正常关闭（FIN）
                         printf("conn_fd=%d closed total=%d\n", c->fd, c->total);
                         // 删除 —— 失败只记一行，流程不变（ENOENT 是正常的）
