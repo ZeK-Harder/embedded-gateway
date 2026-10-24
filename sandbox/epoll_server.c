@@ -228,6 +228,12 @@ int main(void) {
                                 if (drc == 0) {
                                     printf("frame dev=%u func=%u seq=%u plen=%zu\n",
                                            (unsigned)dev, (unsigned)func, (unsigned)seq, plen);
+                                    ssize_t sent_n = send(c->fd, frame_buf, flen, MSG_NOSIGNAL);
+                                    if (sent_n < 0) {
+                                        perror("send");
+                                    } else if ((size_t)sent_n < flen) {
+                                        printf("send: 只发出 %zd/%zu 字节（剩下的丢了，下一步做写缓冲）\n",sent_n, flen);
+                                    }
                                 } else {
                                     /* 数据坏 != 通道坏：只丢这一帧，连接和后面的帧都要继续 */
                                     printf("drop: 解码失败 fd=%d\n", c->fd);
