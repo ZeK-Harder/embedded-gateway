@@ -150,7 +150,7 @@ int main(void) {
                 }
                 c->fd = conn_fd;
 
-                ev.events  = EPOLLIN;
+                ev.events  = EPOLLIN | EPOLLET;
                 ev.data.ptr = c;
                 // 新连接登记 —— 登记不上就别把这条连接留着
                 if (epoll_ctl(epfd, EPOLL_CTL_ADD, conn_fd, &ev) < 0) {
