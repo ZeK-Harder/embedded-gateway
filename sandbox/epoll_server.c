@@ -25,6 +25,7 @@ struct conn {
     unsigned char wbuf[8192];
     size_t wlen;   /* 待发字节数 */
     size_t woff;   /* 已发位置 */
+    int out_on;
 };
 
 static struct conn conns[MAX_CONN];
@@ -47,6 +48,7 @@ static struct conn *conn_alloc(void)
             /* 写缓冲也要在领用时清空 —— 槽位复用时它里面可能还躺着上一条连接的字节 */
             conns[i].wlen  = 0;
             conns[i].woff  = 0;
+            conns[i].out_on = 0;   /* 新加到结构体里的状态，领用时一律清 */
             frame_parser_init(&conns[i].fp);
             return &conns[i];
         }
@@ -90,6 +92,7 @@ static int conn_flush(int epfd, struct conn *c)
             /* 内核发送缓冲满了：不是错误，是"现在写不进去"。
              * 注册 EPOLLOUT，等 socket 变可写再回来接着发。 */
             conn_set_events(epfd, c, EPOLLIN | EPOLLOUT | EPOLLET);
+            c->out_on = 1;
             return 1;
         }
         return -1;                     /* EPIPE / ECONNRESET … 真正的失败 */
@@ -99,7 +102,10 @@ static int conn_flush(int epfd, struct conn *c)
     c->wlen = 0;
     /* 发完必须撤掉 EPOLLOUT：socket 平时一直是"可写"的，
      * 不撤的话 epoll_wait 每次都报可写 -> 空转烧 CPU（和 EMFILE 那次同类）。 */
-    conn_set_events(epfd, c, EPOLLIN | EPOLLET);
+    if (c->out_on) {
+        conn_set_events(epfd, c, EPOLLIN | EPOLLET);
+        c->out_on = 0;
+    }
     return 0;
 }
 
