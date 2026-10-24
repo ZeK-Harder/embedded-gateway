@@ -142,6 +142,17 @@ int main(void) {
             if (c == NULL) {            // 有人来连
                 int conn_fd = accept(listen_fd, NULL, NULL);
                 if (conn_fd < 0) {
+                    /* 抖动类：立刻重试（对端握手期跑了 / 被信号打断 / 队列空了） */
+                    if (errno == EINTR || errno == ECONNABORTED ||
+                        errno == EAGAIN || errno == EWOULDBLOCK) {
+                        continue;
+                    }
+                    /* 资源耗尽：报原因 + 退避。继续空转只会烧 CPU + 刷屏 */
+                    if (errno == EMFILE || errno == ENFILE) {
+                        perror("accept (fd 耗尽)");
+                        sleep(1);
+                        continue;          /* 必须 continue，不能漏到下面的 perror */
+                    }
                     perror("accept");
                     continue;
                 }
