@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 // ---------- 头文件（一行一个来源）----------
 #include <stdio.h>          // printf
 #include <string.h>         // memset
@@ -10,6 +11,7 @@
 #include <sys/epoll.h>     // epoll_create1 / epoll_ctl / epoll_wait
 #include <fcntl.h>         // fcntl, F_GETFL, F_SETFL, O_NONBLOCK
 #include "proto.h"
+#include <signal.h>
 
 #define MAX_CONN 1024
 
@@ -23,6 +25,8 @@ struct conn {
 };
 
 static struct conn conns[MAX_CONN];
+static volatile sig_atomic_t g_stop = 0;      /* 只允许是这一种类型 */
+static void on_stop(int sig) { (void)sig; g_stop = 1; }   /* handler 里只写这一句 */
 
 /* 从池子里拿一个空槽；拿不到返回 NULL */
 static struct conn *conn_alloc(void)
@@ -105,6 +109,16 @@ int main(void) {
         exit(EXIT_FAILURE);
     }
 
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_stop;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    if (sigaction(SIGINT, &sa, NULL) < 0 || sigaction(SIGTERM, &sa, NULL) < 0) {
+        perror("sigaction");
+        exit(EXIT_FAILURE);
+    }
+
     // ---------- 事件循环 ----------
     /* parser 凑齐一整帧时，把这帧的线上字节拷进 frame_buf，长度写进 flen。
      * 放在事件循环外面复用即可：半帧住在 c->fp 里，整帧只在"刚解出来那一瞬"需要一块地方。 */
@@ -114,7 +128,10 @@ int main(void) {
     while (1) {
         int n = epoll_wait(epfd, evs, 8, -1);
         if (n < 0) {
-            if (errno == EINTR) continue;   // 被信号打断，重来
+            if (errno == EINTR) {
+                if (g_stop) break;      /* 是"该退出"那个信号：退主循环 */
+                continue;               /* 别的信号：只算被打断，重来 */
+            }
             perror("epoll_wait");
             break;
         }
@@ -246,5 +263,6 @@ int main(void) {
     }
 
     close(listen_fd);
+    close(epfd);        /* 簿子也要还给内核 */
     return 0;
 }
