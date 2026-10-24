@@ -22,6 +22,9 @@ struct conn {
     unsigned char rbuf[4096];   /* 这条连接攒下的原始字节（半成品柜） */
     size_t rlen;         /* 柜台里现在有多少字节 */
     frame_parser_t fp;   /* 这条连接自己的切包状态机：跨 recv 的半帧住在这里 */
+    unsigned char wbuf[8192];
+    size_t wlen;   /* 待发字节数 */
+    size_t woff;   /* 已发位置 */
 };
 
 static struct conn conns[MAX_CONN];
@@ -41,6 +44,9 @@ static struct conn *conn_alloc(void)
              * 槽位要变成某条连接的只有这一条路，放这里物理上不可能漏；
              * 而关闭路径已经有 3 条（FIN / recv 错误 / 缓冲满），以后还会加心跳超时、写失败 --
              * 放出口就得每条都记得补一次。 */
+            /* 写缓冲也要在领用时清空 —— 槽位复用时它里面可能还躺着上一条连接的字节 */
+            conns[i].wlen  = 0;
+            conns[i].woff  = 0;
             frame_parser_init(&conns[i].fp);
             return &conns[i];
         }
@@ -52,6 +58,66 @@ static void conn_free(struct conn *c)
     c->used = 0;
 }
 
+/* 改这条连接感兴趣的事件 */
+static void conn_set_events(int epfd, struct conn *c, uint32_t evs)
+{
+    struct epoll_event e;
+    memset(&e, 0, sizeof e);
+    e.events   = evs;
+    e.data.ptr = c;
+    if (epoll_ctl(epfd, EPOLL_CTL_MOD, c->fd, &e) < 0 && errno != ENOENT)
+        perror("epoll_ctl MOD");
+}
+
+/* 把 wbuf 里的字节尽量发出去
+ *   返回  0 = 发完了（并且已经把 EPOLLOUT 撤掉）
+ *   返回  1 = 内核发送缓冲满了，剩下的留在 wbuf，等 EPOLLOUT 回来再发
+ *   返回 -1 = 真错误（调用方负责关连接）
+ */
+static int conn_flush(int epfd, struct conn *c)
+{
+    while (c->woff < c->wlen) {
+        ssize_t n = send(c->fd, c->wbuf + c->woff, c->wlen - c->woff, MSG_NOSIGNAL);
+
+        if (n > 0) {
+            c->woff += (size_t)n;      /* 发出去多少就前进多少，否则会永远重发同一批字节 */
+            continue;
+        }
+        if (n < 0 && errno == EINTR) {
+            continue;                  /* 被信号打断：重试，不算错 */
+        }
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            /* 内核发送缓冲满了：不是错误，是"现在写不进去"。
+             * 注册 EPOLLOUT，等 socket 变可写再回来接着发。 */
+            conn_set_events(epfd, c, EPOLLIN | EPOLLOUT | EPOLLET);
+            return 1;
+        }
+        return -1;                     /* EPIPE / ECONNRESET … 真正的失败 */
+    }
+
+    c->woff = 0;
+    c->wlen = 0;
+    /* 发完必须撤掉 EPOLLOUT：socket 平时一直是"可写"的，
+     * 不撤的话 epoll_wait 每次都报可写 -> 空转烧 CPU（和 EMFILE 那次同类）。 */
+    conn_set_events(epfd, c, EPOLLIN | EPOLLET);
+    return 0;
+}
+
+/* 把一整帧追加进写缓冲，然后立刻尝试发出去
+ *   返回 0 / 1 同 conn_flush；返回 -2 = 缓冲满了（本步策略：整帧丢弃）
+ */
+static int conn_queue(int epfd, struct conn *c, const uint8_t *data, size_t len)
+{
+    /* 缓冲满 = 对端读得太慢。V1 策略：整帧丢掉，绝不写半个帧进去 ——
+     * 帧边界比"少收一帧"重要得多（少一帧只是数据缺失，半个帧会让后面全乱）。
+     * 真正一帧不丢需要背压（写满时暂停读这条连接），属于 V2。 */
+    if (sizeof c->wbuf - c->wlen < len) {
+        return -2;
+    }
+    memcpy(c->wbuf + c->wlen, data, len);
+    c->wlen += len;
+    return conn_flush(epfd, c);
+}
 int main(void) {
 
     setvbuf(stdout, NULL, _IOLBF, 0);   //输出重定向到文件时否则全缓冲，脚本读不到
@@ -189,7 +255,23 @@ int main(void) {
                 }
                 printf("已登记 conn_fd=%d\n", conn_fd);
 
-            } else {                          // 已连接的客人可读
+            } else {                          // 已连接的客人
+                /* 先处理"可写"：上次没发完的字节，现在能接着发了。 */
+                if (evs[i].events & EPOLLOUT) {
+                    if (conn_flush(epfd, c) < 0) {
+                        perror("flush");
+                        if (epoll_ctl(epfd, EPOLL_CTL_DEL, c->fd, NULL) < 0 && errno != ENOENT)
+                            perror("epoll_ctl DEL");
+                        conn_free(c);
+                        close(c->fd);
+                        continue;
+                    }
+                }
+                /* 这次事件如果只有"可写"，那就没有可读的事，别往下走读循环 */
+                if (!(evs[i].events & EPOLLIN)) {
+                    continue;
+                }
+
                 ssize_t m;
                 int fd = c->fd;
                 while (1) {
@@ -228,11 +310,13 @@ int main(void) {
                                 if (drc == 0) {
                                     printf("frame dev=%u func=%u seq=%u plen=%zu\n",
                                            (unsigned)dev, (unsigned)func, (unsigned)seq, plen);
-                                    ssize_t sent_n = send(c->fd, frame_buf, flen, MSG_NOSIGNAL);
-                                    if (sent_n < 0) {
+                                    /* 回显走写缓冲：发不完的字节留在 wbuf 里等 EPOLLOUT，
+                                     * 绝不会把一帧撕成两半。 */
+                                    int q = conn_queue(epfd, c, frame_buf, flen);
+                                    if (q == -2) {
+                                        printf("drop: 写缓冲满 fd=%d（对端读太慢，整帧丢弃）" "\n", c->fd);
+                                    } else if (q < 0) {
                                         perror("send");
-                                    } else if ((size_t)sent_n < flen) {
-                                        printf("send: 只发出 %zd/%zu 字节（剩下的丢了，下一步做写缓冲）\n",sent_n, flen);
                                     }
                                 } else {
                                     /* 数据坏 != 通道坏：只丢这一帧，连接和后面的帧都要继续 */
