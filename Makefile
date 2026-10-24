@@ -1,7 +1,7 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -std=c11 -Isrc/proto
+CFLAGS = -Wall -Wextra -Wshadow -std=c11 -Isrc/proto
 
-all: bin/test_crc16 bin/test_decode bin/test_encode bin/test_escape bin/test_frame
+all: bin/test_crc16 bin/test_decode bin/test_encode bin/test_escape bin/test_frame bin/gateway
 
 bin/test_crc16: src/proto/crc16.c src/proto/test_crc16.c
 	$(CC) $(CFLAGS) src/proto/crc16.c src/proto/test_crc16.c -o $@
@@ -17,6 +17,10 @@ bin/test_escape: src/proto/escape.c src/proto/test_escape.c
 
 bin/test_frame: src/proto/frame.c src/proto/codec.c src/proto/crc16.c src/proto/escape.c src/proto/test_frame.c
 	$(CC) $(CFLAGS) src/proto/frame.c src/proto/codec.c src/proto/crc16.c src/proto/escape.c src/proto/test_frame.c -o $@
+
+# net：IO 胶水层，只进 all，不进 test（真实 socket 由 verify/ 下的验收脚本覆盖）
+bin/gateway: src/net/epoll_server.c src/proto/frame.c src/proto/codec.c src/proto/crc16.c src/proto/escape.c
+	$(CC) $(CFLAGS) src/net/epoll_server.c src/proto/frame.c src/proto/codec.c src/proto/crc16.c src/proto/escape.c -o $@
 
 .PHONY: all clean test
 test: all
