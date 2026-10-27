@@ -11,14 +11,19 @@
 #include <sys/epoll.h>     // epoll_create1 / epoll_ctl / epoll_wait
 #include <fcntl.h>         // fcntl, F_GETFL, F_SETFL, O_NONBLOCK
 #include "proto.h"
+#include "pool.h"
 #include <signal.h>
+#include <sys/eventfd.h>
 
 #define MAX_CONN 1024
+#define POOL_WORKERS   4        /* worker 个数：按连接槽位分片 */
+#define POOL_QUEUE_CAP 65536    /* 每条队列能压多少帧（16B/格，约 1MB）—— 要装得下一次突发 */
 
 struct conn {
     int fd;
     int total;          /* 这条连接累计读到多少字节 */
     int used;           /* 槽位是否被占用：0 = 空槽 */
+    int gen;            /* 槽位代数：每被领用一次 +1，用来判断"任务还认得这条连接吗" */
     unsigned char rbuf[4096];   /* 这条连接攒下的原始字节（半成品柜） */
     size_t rlen;         /* 柜台里现在有多少字节 */
     frame_parser_t fp;   /* 这条连接自己的切包状态机：跨 recv 的半帧住在这里 */
@@ -32,12 +37,34 @@ static struct conn conns[MAX_CONN];
 static volatile sig_atomic_t g_stop = 0;      /* 只允许是这一种类型 */
 static void on_stop(int sig) { (void)sig; g_stop = 1; }   /* handler 里只写这一句 */
 
+/* ---------- IO 线程只投递：线程池 + 回投通道 ----------
+ *   g_pool    4 个 worker，投递时按连接槽位选队列（同一连接保序，不同连接并行）
+ *   g_outq    反方向队列：worker 处理完把"要发的帧"投回来，由 IO 线程统一 send
+ *   g_efd     eventfd：worker 投完写 8 字节，把阻塞在 epoll_wait 的 IO 线程叫醒
+ *   g_efd_tag 事件循环里用来认出"这是 eventfd"（门用的是 NULL）
+ */
+static struct pool       g_pool;
+static struct task_queue g_outq;
+static int  g_efd = -1;
+static int  g_epfd = -1;
+static char g_efd_tag;
+
+/* 一次投递带走的东西：帧字节的副本 + "我是哪条连接"（槽位 + 代数） */
+struct frame_job {
+    int     slot;
+    int     gen;
+    int     fd;          /* 只给日志用 */
+    size_t  len;
+    uint8_t buf[];       /* 柔性数组：malloc 一次就把帧字节带上，不像 rbuf 那样会被下轮 recv 覆盖 */
+};
+
 /* 从池子里拿一个空槽；拿不到返回 NULL */
 static struct conn *conn_alloc(void)
 {
     for (int i = 0; i < MAX_CONN; i++)
         if (!conns[i].used) {
             conns[i].used  = 1;
+            conns[i].gen  += 1;        /* 换一代：上一条连接留下的任务立刻失效 */
             conns[i].fd    = -1;
             conns[i].total = 0;
             conns[i].rlen  = 0;
@@ -125,39 +152,87 @@ static int conn_queue(int epfd, struct conn *c, const uint8_t *data, size_t len)
     return conn_flush(epfd, c);
 }
 
-/* 收到一整帧之后要干的事：解码 → 打印 → 回显（坏帧就丢掉这一帧）。
- * 抽成独立函数，是为了下一步把它交给 worker 线程执行 —— 那时调用方
- * 从"recv 循环里"变成"worker 里"，函数本身不该再依赖循环里的任何变量，
- * 所以需要的东西全部由参数传进来。
+/* ---------------- IO 线程只投递：两条边各管一半 ----------------
+ *
+ *   IO 线程（epoll） ：收字节 → 切帧 → malloc 一份帧副本 → pool_submit
+ *   worker 线程      ：proto_decode → 业务（这里只有 printf）→ 投回 g_outq → 敲 eventfd
+ *   IO 线程（eventfd）：从 g_outq 取出 → conn_queue → 真正 send
+ *
+ * 为什么是"回投"而不是 worker 直接 send：wbuf / woff / wlen 只有 IO 线程碰，
+ * 就完全不需要锁；worker 再多也不会两个人同时改同一条连接的写缓冲。
  */
-static void handle_frame(int epfd, struct conn *c, const uint8_t *buf, size_t len)
-{
-    /* decode 的 4 个字段 + 1 块载荷空间，先全部给 0，
-     * 保证 drc 失败时打印出来的是确定值而不是垃圾 */
-    uint8_t  dev  = 0;
-    uint8_t  func = 0;
-    uint16_t seq  = 0;
-    uint8_t  payload[PROTO_PAYLOAD_MAX];  /* V1 不解释载荷，但 API 要一块地方接 */
-    size_t   plen = 0;
 
-    /* drc 和上面的 rc 是两个东西：
-     *   rc  = parser 交没交出一整帧（这里已经=1）
-     *   drc = 这帧对不对（帧头帧尾 / LEN 自洽 / CRC） */
-    int drc = proto_decode(buf, len, &dev, &func,&seq, payload, sizeof payload, &plen);
-    if (drc == 0) {
-        printf("frame dev=%u func=%u seq=%u plen=%zu\n",
-               (unsigned)dev, (unsigned)func, (unsigned)seq, plen);
-        /* 回显走写缓冲：发不完的字节留在 wbuf 里等 EPOLLOUT，
-         * 绝不会把一帧撕成两半。 */
-        int q = conn_queue(epfd, c, buf, len);
+/* IO 线程侧：把 worker 交回来的帧真正发出去。
+ * 先验"这条连接还是不是我认的那一条"：槽位可能已被回收、又被新连接复用，
+ * 代数（gen）就是用来区分"同一个座位上的两个不同客人"的。 */
+static void send_back(void *arg)
+{
+    struct frame_job *fj = arg;
+    struct conn *c = NULL;
+
+    if (fj->slot >= 0 && fj->slot < MAX_CONN &&
+        conns[fj->slot].used && conns[fj->slot].gen == fj->gen) {
+        c = &conns[fj->slot];
+    }
+    if (c != NULL) {
+        int q = conn_queue(g_epfd, c, fj->buf, fj->len);
         if (q == -2) {
-            printf("drop: 写缓冲满 fd=%d（对端读太慢，整帧丢弃）" "\n", c->fd);
+            printf("drop: 写缓冲满 fd=%d（对端读太慢，整帧丢弃）\n", c->fd);
         } else if (q < 0) {
             perror("send");
         }
     } else {
-        /* 数据坏 != 通道坏：只丢这一帧，连接和后面的帧都要继续 */
-        printf("drop: 解码失败 fd=%d\n", c->fd);
+        printf("drop: 连接已关闭 slot=%d（回投的帧作废）\n", fj->slot);
+    }
+    free(fj);
+}
+
+/* 排空回投队列。顺序很重要：先取队列、再读 eventfd。
+ * 反过来（先读 eventfd 再取队列）有个缝隙：worker 正好在我们读完之后 push + 敲，
+ * 计数被这次 read 清掉，于是队列里有东西却没人再叫醒 IO 线程 —— 卡住的经典写法。 */
+static void drain_outq(void)
+{
+    struct task t;
+
+    for (;;) {
+        while (taskq_pop(&g_outq, &t) == 0) t.fn(t.arg);
+
+        uint64_t v;
+        if (read(g_efd, &v, sizeof v) <= 0) break;   /* EAGAIN = 真排空了 */
+    }
+}
+
+/* worker 侧：解码 + 业务。解码失败就把这份内存还掉，不往下传。 */
+static void frame_job_run(void *arg)
+{
+    struct frame_job *fj = arg;
+
+    uint8_t  dev  = 0;
+    uint8_t  func = 0;
+    uint16_t seq  = 0;
+    uint8_t  payload[PROTO_PAYLOAD_MAX];
+    size_t   plen = 0;
+
+    if (proto_decode(fj->buf, fj->len, &dev, &func, &seq, payload, sizeof payload, &plen) != 0) {
+        /* 数据坏 != 通道坏：只丢这一帧，连接和后面的帧都继续 */
+        printf("drop: 解码失败 fd=%d\n", fj->fd);
+        free(fj);
+        return;
+    }
+
+    printf("frame dev=%u func=%u seq=%u plen=%zu tid=%ld\n",
+           (unsigned)dev, (unsigned)func, (unsigned)seq, plen, (long)pthread_self());
+
+    struct task t = { send_back, fj };
+    if (taskq_push(&g_outq, t) != 0) {
+        printf("drop: 回投队列满 fd=%d（整帧丢弃）\n", fj->fd);
+        free(fj);
+        return;
+    }
+
+    uint64_t one = 1;
+    if (write(g_efd, &one, sizeof one) < 0 && errno != EAGAIN) {
+        perror("write eventfd");   /* 唤不醒也不会丢：IO 线程下次醒来仍会排空队列 */
     }
 }
 
@@ -218,6 +293,29 @@ int main(void) {
         exit(EXIT_FAILURE);
     }
 
+    /* ---------- 起线程池 + 造回投通道 ---------- */
+    g_epfd = epfd;
+    if (taskq_init(&g_outq, POOL_QUEUE_CAP) != 0) {
+        perror("taskq_init g_outq");
+        exit(EXIT_FAILURE);
+    }
+    if (pool_start(&g_pool, POOL_WORKERS, POOL_QUEUE_CAP) != 0) {
+        fprintf(stderr, "pool_start 失败\n");
+        exit(EXIT_FAILURE);
+    }
+    g_efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (g_efd < 0) {
+        perror("eventfd");
+        exit(EXIT_FAILURE);
+    }
+    ev.events   = EPOLLIN;
+    ev.data.ptr = &g_efd_tag;
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, g_efd, &ev) < 0) {
+        perror("epoll_ctl ADD eventfd");
+        exit(EXIT_FAILURE);
+    }
+    printf("io tid=%ld  worker=%d\n", (long)pthread_self(), POOL_WORKERS);
+
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
     sa.sa_handler = on_stop;
@@ -248,7 +346,9 @@ int main(void) {
         for (int i = 0; i < n; i++) {
             struct conn *c = evs[i].data.ptr;
 
-            if (c == NULL) {            // 有人来连
+            if ((void *)c == (void *)&g_efd_tag) {   // worker 投回了要发的帧
+                drain_outq();
+            } else if (c == NULL) {     // 有人来连
                 int conn_fd = accept(listen_fd, NULL, NULL);
                 if (conn_fd < 0) {
                     /* 抖动类：立刻重试（对端握手期跑了 / 被信号打断 / 队列空了） */
@@ -338,7 +438,23 @@ int main(void) {
                         for (size_t bi = start; bi < c->rlen; bi++) {
                             int rc = frame_parser_feed(&c->fp, c->rbuf[bi],frame_buf, sizeof frame_buf, &flen);
                             if (rc == 1) {                    /* 凑齐一整帧了 */
-                                handle_frame(epfd, c, frame_buf, flen);
+                                /* 不在 IO 线程里解码了：把这一帧连同"我是谁"打包投给 worker。
+                                 * 帧字节必须复制：rbuf / frame_buf 下轮 recv 就被覆盖了。 */
+                                struct frame_job *fj = malloc(sizeof *fj + flen);
+                                if (fj == NULL) {
+                                    printf("drop: 内存不足 fd=%d\n", c->fd);
+                                } else {
+                                    fj->slot = (int)(c - conns);
+                                    fj->gen  = c->gen;
+                                    fj->fd   = c->fd;
+                                    fj->len  = flen;
+                                    memcpy(fj->buf, frame_buf, flen);
+                                    struct task tj = { frame_job_run, fj };
+                                    if (pool_submit(&g_pool, (size_t)fj->slot, tj) != 0) {
+                                        printf("drop: 任务队列满 fd=%d（整帧丢弃）\n", c->fd);
+                                        free(fj);
+                                    }
+                                }
                             } else if (rc == -1) {
                                 /* 超长帧：parser 已丢弃并重新同步，接着喂后面的字节 */
                                 printf("drop: 超长帧 fd=%d\n", c->fd);
@@ -380,6 +496,7 @@ int main(void) {
         }
     }
 
+    close(g_efd);       /* eventfd 也是 fd，一起还 */
     close(listen_fd);
     close(epfd);        /* 簿子也要还给内核 */
     return 0;

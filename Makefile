@@ -18,7 +18,7 @@ bin/test_escape: src/proto/escape.c src/proto/test_escape.c
 bin/test_frame: src/proto/frame.c src/proto/codec.c src/proto/crc16.c src/proto/escape.c src/proto/test_frame.c
 	$(CC) $(CFLAGS) src/proto/frame.c src/proto/codec.c src/proto/crc16.c src/proto/escape.c src/proto/test_frame.c -o $@
 
-POOL = src/pool/task_queue.c
+POOL = src/pool/task_queue.c src/pool/pool.c
 
 # net：IO 胶水层，只进 all，不进 test（真实 socket 由 verify/ 下的验收脚本覆盖）
 bin/test_pool: src/pool/test_pool.c $(POOL)
