@@ -42,6 +42,7 @@ struct task_queue {
     size_t head;                /* 下一次出队从哪一格取 */
     size_t tail;                /* 下一次入队往哪一格写 */
     size_t count;               /* 现在里面有几个任务（"空/满"只能问它） */
+    int    stopping;            /* 0 = 正常营业；1 = 已下令收摊（只在锁内改、锁内读） */
 };
 
 /* 成功 0；cap 为 0 或内存不够 -1。失败时队列处于"可安全应答的空态"（不崩） */
@@ -59,7 +60,13 @@ int    taskq_push(struct task_queue *q, struct task t);
 /* 非阻塞出队：成功 0，空 -1 */
 int    taskq_pop(struct task_queue *q, struct task *out);
 
-/* 阻塞出队：空则睡，被 push 叫醒；成功 0 */
+/* 阻塞出队：空则睡，被 push 叫醒；成功 0
+ * 收摊之后（taskq_stop 过）→ 队列空的就返回 -1，让 worker 走人；
+ * 队列里还剩活的话仍然要取完（收摊 ≠ 丢任务）。 */
 int    taskq_pop_wait(struct task_queue *q, struct task *out);
+
+/* 下令收摊：锁内置 stopping = 1，再 broadcast 叫醒**所有**睡在 not_empty 上的人。
+ * 幂等；调用之后不许再 push。 */
+void   taskq_stop(struct task_queue *q);
 
 #endif

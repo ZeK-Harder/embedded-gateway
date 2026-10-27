@@ -24,10 +24,11 @@ int taskq_init(struct task_queue *q, size_t cap)
     }
     pthread_mutex_init(&q->lock, NULL);
     pthread_cond_init(&q->not_empty, NULL);
-    q->cap   = cap;
-    q->head  = 0;
-    q->tail  = 0;
-    q->count = 0;
+    q->cap      = cap;
+    q->head     = 0;
+    q->tail     = 0;
+    q->count    = 0;
+    q->stopping = 0;
     return 0;
 }
 
@@ -41,6 +42,7 @@ void taskq_free(struct task_queue *q)
     free(q->items);
     q->items = NULL;
     q->cap = q->head = q->tail = q->count = 0;
+    q->stopping = 0;
 }
 
 /* 两个"为什么"：
@@ -121,11 +123,39 @@ int taskq_pop_wait(struct task_queue *q, struct task *out)
     int rc = 0;
 
     pthread_mutex_lock(&q->lock);
-    while (q->count == 0)
+    while (q->count == 0 && q->stopping == 0)
         pthread_cond_wait(&q->not_empty, &q->lock);
-    *out = q->items[q->head];
-    q->head = (q->head + 1) % q->cap;
-    q->count--;
+    if(q->count == 0){
+        rc = -1;
+    }else{
+        *out = q->items[q->head];
+        q->head = (q->head + 1) % q->cap;
+        q->count--;
+    }
     pthread_mutex_unlock(&q->lock);
     return rc;
+}
+
+/* 下令收摊：置标志 + 叫醒所有等着的人。两件事都必须在锁内做。
+ *
+ * ① 为什么不能在锁外置 stopping / 发广播 —— "丢失唤醒"：
+ *    消费者是"锁内判条件 → 睡下（wait 内部原子地放锁+睡）"。
+ *    如果这边不持锁就把广播发完，可能正好插在"消费者判完条件、还没真的睡下"之间，
+ *    那声广播落在空处，消费者接着睡，永远没人再叫它 —— 表现就是关不掉、卡死。
+ *    持锁做之后：消费者要么还没判条件（醒来会重新判，看得见 stopping=1），
+ *    要么已经睡下（广播一定送达）。两条路都不漏。
+ *
+ * ② 为什么是 broadcast 不是 signal：
+ *    signal 只保证叫醒"至少一个"。收摊是"所有人的事" —— 同一条队列上睡着 4 个 worker 时，
+ *    一声 signal 只走一个，剩下 3 个继续睡，join 就永远等不回来。
+ *
+ * ③ 为什么置了标志还要广播：光有标志，睡着的人不会自己醒来看它。
+ *    "标志"负责表达状态，"广播"负责把消息送到 —— 缺一个都收不了摊。
+ */
+void taskq_stop(struct task_queue *q)
+{
+    pthread_mutex_lock(&q->lock);
+    q->stopping = 1;
+    pthread_cond_broadcast(&q->not_empty);
+    pthread_mutex_unlock(&q->lock);
 }
