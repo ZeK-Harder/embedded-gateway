@@ -124,6 +124,43 @@ static int conn_queue(int epfd, struct conn *c, const uint8_t *data, size_t len)
     c->wlen += len;
     return conn_flush(epfd, c);
 }
+
+/* 收到一整帧之后要干的事：解码 → 打印 → 回显（坏帧就丢掉这一帧）。
+ * 抽成独立函数，是为了下一步把它交给 worker 线程执行 —— 那时调用方
+ * 从"recv 循环里"变成"worker 里"，函数本身不该再依赖循环里的任何变量，
+ * 所以需要的东西全部由参数传进来。
+ */
+static void handle_frame(int epfd, struct conn *c, const uint8_t *buf, size_t len)
+{
+    /* decode 的 4 个字段 + 1 块载荷空间，先全部给 0，
+     * 保证 drc 失败时打印出来的是确定值而不是垃圾 */
+    uint8_t  dev  = 0;
+    uint8_t  func = 0;
+    uint16_t seq  = 0;
+    uint8_t  payload[PROTO_PAYLOAD_MAX];  /* V1 不解释载荷，但 API 要一块地方接 */
+    size_t   plen = 0;
+
+    /* drc 和上面的 rc 是两个东西：
+     *   rc  = parser 交没交出一整帧（这里已经=1）
+     *   drc = 这帧对不对（帧头帧尾 / LEN 自洽 / CRC） */
+    int drc = proto_decode(buf, len, &dev, &func,&seq, payload, sizeof payload, &plen);
+    if (drc == 0) {
+        printf("frame dev=%u func=%u seq=%u plen=%zu\n",
+               (unsigned)dev, (unsigned)func, (unsigned)seq, plen);
+        /* 回显走写缓冲：发不完的字节留在 wbuf 里等 EPOLLOUT，
+         * 绝不会把一帧撕成两半。 */
+        int q = conn_queue(epfd, c, buf, len);
+        if (q == -2) {
+            printf("drop: 写缓冲满 fd=%d（对端读太慢，整帧丢弃）" "\n", c->fd);
+        } else if (q < 0) {
+            perror("send");
+        }
+    } else {
+        /* 数据坏 != 通道坏：只丢这一帧，连接和后面的帧都要继续 */
+        printf("drop: 解码失败 fd=%d\n", c->fd);
+    }
+}
+
 int main(void) {
 
     setvbuf(stdout, NULL, _IOLBF, 0);   //输出重定向到文件时否则全缓冲，脚本读不到
@@ -301,33 +338,7 @@ int main(void) {
                         for (size_t bi = start; bi < c->rlen; bi++) {
                             int rc = frame_parser_feed(&c->fp, c->rbuf[bi],frame_buf, sizeof frame_buf, &flen);
                             if (rc == 1) {                    /* 凑齐一整帧了 */
-                                /* decode 的 4 个字段 + 1 块载荷空间，先全部给 0，
-                                 * 保证 drc 失败时打印出来的是确定值而不是垃圾 */
-                                uint8_t  dev  = 0;
-                                uint8_t  func = 0;
-                                uint16_t seq  = 0;
-                                uint8_t  payload[PROTO_PAYLOAD_MAX];  /* V1 不解释载荷，但 API 要一块地方接 */
-                                size_t   plen = 0;
-
-                                /* drc 和上面的 rc 是两个东西：
-                                 *   rc  = parser 交没交出一整帧（这里已经=1）
-                                 *   drc = 这帧对不对（帧头帧尾 / LEN 自洽 / CRC） */
-                                int drc = proto_decode(frame_buf, flen, &dev, &func,&seq, payload, sizeof payload, &plen);
-                                if (drc == 0) {
-                                    printf("frame dev=%u func=%u seq=%u plen=%zu\n",
-                                           (unsigned)dev, (unsigned)func, (unsigned)seq, plen);
-                                    /* 回显走写缓冲：发不完的字节留在 wbuf 里等 EPOLLOUT，
-                                     * 绝不会把一帧撕成两半。 */
-                                    int q = conn_queue(epfd, c, frame_buf, flen);
-                                    if (q == -2) {
-                                        printf("drop: 写缓冲满 fd=%d（对端读太慢，整帧丢弃）" "\n", c->fd);
-                                    } else if (q < 0) {
-                                        perror("send");
-                                    }
-                                } else {
-                                    /* 数据坏 != 通道坏：只丢这一帧，连接和后面的帧都要继续 */
-                                    printf("drop: 解码失败 fd=%d\n", c->fd);
-                                }
+                                handle_frame(epfd, c, frame_buf, flen);
                             } else if (rc == -1) {
                                 /* 超长帧：parser 已丢弃并重新同步，接着喂后面的字节 */
                                 printf("drop: 超长帧 fd=%d\n", c->fd);
