@@ -75,3 +75,33 @@ int store_init_schema(sqlite3 *db)
 
     return 0;
 }
+
+int store_insert_event(sqlite3 *db, int dev_id, long long ts, int func, int val)
+{
+    char sql[256];
+    int rc;
+
+    snprintf(sql, sizeof sql,
+             "INSERT INTO events (dev_id, ts, func, val) VALUES (%d, %lld, %d, %d);",
+             dev_id, ts, func, val);
+
+    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    if (rc == SQLITE_OK) {
+        return 0;
+    }
+
+    if(rc == SQLITE_CONSTRAINT){
+        fprintf(stderr, "store_insert_event: rc=%d %s\n", rc, sqlite3_errmsg(db));
+        return -1;
+    }
+    if(rc == SQLITE_BUSY){
+        fprintf(stderr, "store_insert_event: rc=%d %s\n", rc, sqlite3_errmsg(db));
+        return -2;
+    }
+    else{
+        fprintf(stderr, "store_insert_event: rc=%d %s\n", rc, sqlite3_errmsg(db));
+        return -3;
+    }
+    fprintf(stderr, "store_insert_event: rc=%d %s\n", rc, sqlite3_errmsg(db));
+    return -99;
+}

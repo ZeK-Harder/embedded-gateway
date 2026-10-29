@@ -12,4 +12,12 @@ void store_close(sqlite3 *db);
 /* 建表（幂等：已存在就当成功）。成功 0，失败 -1。 */
 int store_init_schema(sqlite3 *db);
 
+/* 插一条事件。返回值（调用方靠它决定"重试 / 丢弃 / 报警"，所以必须区分）：
+ *   0  = 写进库了
+ *  -1  = 数据本身不合规（约束冲突等）→ 调用方丢掉这条帧，继续跑
+ *  -2  = 库暂时被锁（SQLITE_BUSY）→ 调用方稍后重试；本函数不自己重试
+ *  -3  = 库写不进去（磁盘满 / IO 错 / 库损坏）→ 调用方报警并停止落库
+ */
+int store_insert_event(sqlite3 *db, int dev_id, long long ts, int func, int val);
+
 #endif
