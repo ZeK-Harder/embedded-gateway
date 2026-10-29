@@ -102,6 +102,4 @@ int store_insert_event(sqlite3 *db, int dev_id, long long ts, int func, int val)
         fprintf(stderr, "store_insert_event: rc=%d %s\n", rc, sqlite3_errmsg(db));
         return -3;
     }
-    fprintf(stderr, "store_insert_event: rc=%d %s\n", rc, sqlite3_errmsg(db));
-    return -99;
 }
