@@ -2,6 +2,7 @@
  * store_open / store_close 是样板，学习点在中间那个 store_init_schema。
  */
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "store.h"
 
@@ -102,4 +103,53 @@ int store_insert_event(sqlite3 *db, int dev_id, long long ts, int func, int val)
         fprintf(stderr, "store_insert_event: rc=%d %s\n", rc, sqlite3_errmsg(db));
         return -3;
     }
+}
+
+/* 为什么不能把 cb 直接交给 exec：exec 的回调签名要的是 char**（字符串），
+ * 而 store_row_cb 要的是 int/long long；exec 又只有一个 void* 能带上下文，
+ * 所以用这个 struct 把 cb 和 ctx 一起递进去，由 row_adapter 负责转换。
+ */
+struct qctx {
+    store_row_cb cb;
+    void *ctx;
+};
+
+static int row_adapter(void *arg, int ncol, char **vals, char **names)
+{
+    struct qctx *q = arg;
+
+    (void)names;
+    if (ncol < 4) {
+        return 1;       /* 列数不对就别往下走，让 exec 直接中止 */
+    }
+
+    /* 字符串 -> 数字，然后交回调用方（列顺序来自 SELECT 的列顺序） */
+    q->cb(q->ctx, atoi(vals[0]), atoll(vals[1]), atoi(vals[2]), atoi(vals[3]));
+    return 0;
+}
+
+int store_query_recent(sqlite3 *db, int dev_id, int limit, store_row_cb cb, void *ctx)
+{
+    char sql[256];
+    struct qctx q;
+    int rc;
+
+    q.cb = cb;
+    q.ctx = ctx;
+
+    snprintf(sql, sizeof sql,
+             "SELECT dev_id, ts, func, val FROM events WHERE dev_id = %d ORDER BY ts DESC LIMIT %d;",
+             dev_id, limit);
+
+    rc = sqlite3_exec(db, sql, row_adapter, &q, NULL);
+
+    if (rc == SQLITE_OK) {
+        return 0;
+    }
+    if (rc == SQLITE_BUSY) {
+        fprintf(stderr, "store_query_recent: rc=%d %s\n", rc, sqlite3_errmsg(db));
+        return -2;
+    }
+    fprintf(stderr, "store_query_recent: rc=%d %s\n", rc, sqlite3_errmsg(db));
+    return -3;
 }

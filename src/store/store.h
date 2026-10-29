@@ -20,4 +20,12 @@ int store_init_schema(sqlite3 *db);
  */
 int store_insert_event(sqlite3 *db, int dev_id, long long ts, int func, int val);
 
+/* 每查出一行，store 层就回调一次，把该行交给你（打印 / 塞缓冲 / 丢掉都行）。 */
+typedef void (*store_row_cb)(void *ctx, int dev_id, long long ts, int func, int val);
+
+/* 查某台设备最近 limit 条事件，按 ts 从新到旧。
+ * 返回值与上面一致：0 成功 / -1 SQL 错 / -2 BUSY / -3 其他。
+ * cb 传 NULL 时只数行不回调（后面要"查最近 N 条"的计数也用得上）。 */
+int store_query_recent(sqlite3 *db, int dev_id, int limit, store_row_cb cb, void *ctx);
+
 #endif
