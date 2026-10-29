@@ -14,6 +14,7 @@
 #include "proto.h"
 #include "pool.h"
 #include "store.h"
+#include "crash.h"          /* crash_install：崩溃现场记录（src/crash/） */
 #include <signal.h>
 #include <sys/eventfd.h>
 
@@ -260,6 +261,14 @@ int main(int argc, char **argv) {
     const char *db_path = (argc > 1) ? argv[1] : "/tmp/gateway.db";
 
     setvbuf(stdout, NULL, _IOLBF, 0);   //输出重定向到文件时否则全缓冲，脚本读不到
+
+    /* ---------- 崩溃现场记录：启动期就把日志 fd 打开（2026-10-29 学生选 A） ----------
+     * 路径可由环境变量 GATEWAY_CRASH_LOG 覆盖（验收脚本用它指到 /tmp 下）；
+     * 打不开就当场退出 —— 崩溃日志开不了 = 出事以后没人知道为什么。 */
+    if (crash_install(getenv("GATEWAY_CRASH_LOG")) != 0) {
+        perror("crash_install");
+        exit(EXIT_FAILURE);
+    }
 
     // ---------- 落库：开库 + 建表（启动阶段失败 = 程序干不了活，直接死）----------
     if (store_open(db_path, &g_db) != 0) {

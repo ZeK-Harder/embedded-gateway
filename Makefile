@@ -1,7 +1,8 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -Wshadow -std=c11 -Isrc/proto -Isrc/pool -Isrc/store
+CFLAGS = -Wall -Wextra -Wshadow -std=c11 -g -Isrc/proto -Isrc/pool -Isrc/store -Isrc/crash
+# -g：带调试信息，addr2line 才能把崩溃日志里的偏移还原成"文件:行号"（发布版可以 strip 掉）
 
-all: bin/test_crc16 bin/test_decode bin/test_encode bin/test_escape bin/test_frame bin/gateway bin/test_pool bin/store_probe
+all: bin/test_crc16 bin/test_decode bin/test_encode bin/test_escape bin/test_frame bin/gateway bin/test_pool bin/store_probe bin/crash_probe
 
 bin/test_crc16: src/proto/crc16.c src/proto/test_crc16.c
 	$(CC) $(CFLAGS) src/proto/crc16.c src/proto/test_crc16.c -o $@
@@ -30,8 +31,15 @@ STORE = src/store/store.c
 bin/store_probe: src/store/store_probe.c $(STORE)
 	$(CC) $(CFLAGS) src/store/store_probe.c $(STORE) -lsqlite3 -o $@
 
-bin/gateway: src/net/epoll_server.c $(POOL) src/proto/frame.c src/proto/codec.c src/proto/crc16.c src/proto/escape.c $(STORE)
-	$(CC) $(CFLAGS) -pthread src/net/epoll_server.c $(POOL) src/proto/frame.c src/proto/codec.c src/proto/crc16.c src/proto/escape.c $(STORE) -lsqlite3 -o $@
+CRASH = src/crash/crash.c
+
+# crash：handler 只在真崩时才跑，正常路径覆盖不到它 —— 靠 verify/ 下的探针脚本覆盖
+# -rdynamic：把全局符号导进动态符号表，backtrace_symbols_fd 才认得出函数名（学生选 A，2026-10-29）
+bin/crash_probe: src/crash/crash_probe.c $(CRASH)
+	$(CC) $(CFLAGS) -rdynamic src/crash/crash_probe.c $(CRASH) -o $@
+
+bin/gateway: src/net/epoll_server.c $(POOL) src/proto/frame.c src/proto/codec.c src/proto/crc16.c src/proto/escape.c $(STORE) $(CRASH)
+	$(CC) $(CFLAGS) -pthread -rdynamic src/net/epoll_server.c $(POOL) src/proto/frame.c src/proto/codec.c src/proto/crc16.c src/proto/escape.c $(STORE) $(CRASH) -lsqlite3 -o $@
 
 .PHONY: all clean test
 test: all
@@ -45,4 +53,3 @@ test: all
 
 clean:
 	rm -f bin/*
-
