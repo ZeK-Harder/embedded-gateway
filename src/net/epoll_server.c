@@ -8,10 +8,12 @@
 #include <arpa/inet.h>     // htons / htonl / inet_addr
 #include <errno.h>         // errno, EAGAIN, EWOULDBLOCK, EINTR
 #include <stdlib.h>        // exit / EXIT_FAILURE
+#include <time.h>          // time：落库的时间戳
 #include <sys/epoll.h>     // epoll_create1 / epoll_ctl / epoll_wait
 #include <fcntl.h>         // fcntl, F_GETFL, F_SETFL, O_NONBLOCK
 #include "proto.h"
 #include "pool.h"
+#include "store.h"
 #include <signal.h>
 #include <sys/eventfd.h>
 
@@ -48,6 +50,8 @@ static struct task_queue g_outq;
 static int  g_efd = -1;
 static int  g_epfd = -1;
 static char g_efd_tag;
+
+static sqlite3 *g_db = NULL;   /* 落库：全进程一个连接（sqlite3 默认 serialized，多线程共享安全） */
 
 /* 一次投递带走的东西：帧字节的副本 + "我是哪条连接"（槽位 + 代数） */
 struct frame_job {
@@ -223,6 +227,21 @@ static void frame_job_run(void *arg)
     printf("frame dev=%u func=%u seq=%u plen=%zu tid=%ld\n",
            (unsigned)dev, (unsigned)func, (unsigned)seq, plen, (long)pthread_self());
 
+    /* 落库：这一帧写进 events。IO 线程一行都不碰库 —— 磁盘再慢也只慢 worker。
+     * val 先取 payload 的第一个字节（以后按 func 再解析具体含义）。 */
+    int val  = (plen > 0) ? (int)payload[0] : 0;
+    int sret = store_insert_event(g_db, (int)dev, (long long)time(NULL), (int)func, val);
+    if (sret == -1) {
+        /* 数据不合规：丢这一帧，连接和后面的帧都继续 */
+        printf("store: 数据不合规，丢这一帧 fd=%d seq=%u\n", fj->fd, (unsigned)seq);
+    } else if (sret == -2) {
+        /* 库被别的连接锁着：这帧先丢，由调用方那层再决定要不要重试（V1 不重试） */
+        printf("store: 库忙，这帧没写进去 fd=%d seq=%u\n", fj->fd, (unsigned)seq);
+    } else if (sret != 0) {
+        /* -3 磁盘满 / IO 错：V1 只报不停写 */
+        printf("store: 库写不进去 rc=%d fd=%d seq=%u\n", sret, fj->fd, (unsigned)seq);
+    }
+
     struct task t = { send_back, fj };
     if (taskq_push(&g_outq, t) != 0) {
         printf("drop: 回投队列满 fd=%d（整帧丢弃）\n", fj->fd);
@@ -236,9 +255,24 @@ static void frame_job_run(void *arg)
     }
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    /* 库路径可以由命令行给，方便验收脚本用一个干净的库 */
+    const char *db_path = (argc > 1) ? argv[1] : "/tmp/gateway.db";
 
     setvbuf(stdout, NULL, _IOLBF, 0);   //输出重定向到文件时否则全缓冲，脚本读不到
+
+    // ---------- 落库：开库 + 建表（启动阶段失败 = 程序干不了活，直接死）----------
+    if (store_open(db_path, &g_db) != 0) {
+        fprintf(stderr, "store_open(%s) 失败\n", db_path);
+        exit(EXIT_FAILURE);
+    }
+    if (store_init_schema(g_db) != 0) {
+        fprintf(stderr, "store_init_schema 失败\n");
+        store_close(g_db);
+        exit(EXIT_FAILURE);
+    }
+    printf("store db=%s ready\n", db_path);
+
 
     // ---------- 造门 ----------
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);

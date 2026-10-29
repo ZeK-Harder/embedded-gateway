@@ -30,8 +30,8 @@ STORE = src/store/store.c
 bin/store_probe: src/store/store_probe.c $(STORE)
 	$(CC) $(CFLAGS) src/store/store_probe.c $(STORE) -lsqlite3 -o $@
 
-bin/gateway: src/net/epoll_server.c $(POOL) src/proto/frame.c src/proto/codec.c src/proto/crc16.c src/proto/escape.c
-	$(CC) $(CFLAGS) -pthread src/net/epoll_server.c $(POOL) src/proto/frame.c src/proto/codec.c src/proto/crc16.c src/proto/escape.c -o $@
+bin/gateway: src/net/epoll_server.c $(POOL) src/proto/frame.c src/proto/codec.c src/proto/crc16.c src/proto/escape.c $(STORE)
+	$(CC) $(CFLAGS) -pthread src/net/epoll_server.c $(POOL) src/proto/frame.c src/proto/codec.c src/proto/crc16.c src/proto/escape.c $(STORE) -lsqlite3 -o $@
 
 .PHONY: all clean test
 test: all
