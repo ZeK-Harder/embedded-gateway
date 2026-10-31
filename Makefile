@@ -2,7 +2,7 @@ CC = gcc
 CFLAGS = -Wall -Wextra -Wshadow -std=c11 -g -Isrc/proto -Isrc/pool -Isrc/store -Isrc/crash
 # -g：带调试信息，addr2line 才能把崩溃日志里的偏移还原成"文件:行号"（发布版可以 strip 掉）
 
-all: bin/test_crc16 bin/test_decode bin/test_encode bin/test_escape bin/test_frame bin/gateway bin/test_pool bin/store_probe bin/crash_probe
+all: bin/test_crc16 bin/test_decode bin/test_encode bin/test_escape bin/test_frame bin/gateway bin/test_pool bin/store_probe bin/crash_probe bin/loadgen
 
 bin/test_crc16: src/proto/crc16.c src/proto/test_crc16.c
 	$(CC) $(CFLAGS) src/proto/crc16.c src/proto/test_crc16.c -o $@
@@ -29,7 +29,7 @@ STORE = src/store/store.c
 
 # store：SQLite 胶水层，只进 all，不进 test（真库由 verify/ 下的验收脚本覆盖）
 bin/store_probe: src/store/store_probe.c $(STORE)
-	$(CC) $(CFLAGS) src/store/store_probe.c $(STORE) -lsqlite3 -o $@
+	$(CC) $(CFLAGS) -pthread src/store/store_probe.c $(STORE) -lsqlite3 -o $@
 
 CRASH = src/crash/crash.c
 
@@ -40,6 +40,11 @@ bin/crash_probe: src/crash/crash_probe.c $(CRASH)
 
 bin/gateway: src/net/epoll_server.c $(POOL) src/proto/frame.c src/proto/codec.c src/proto/crc16.c src/proto/escape.c $(STORE) $(CRASH)
 	$(CC) $(CFLAGS) -pthread -rdynamic src/net/epoll_server.c $(POOL) src/proto/frame.c src/proto/codec.c src/proto/crc16.c src/proto/escape.c $(STORE) $(CRASH) -lsqlite3 -o $@
+
+LOADGEN = tools/loadgen/loadgen.c
+# loadgen：压测工具（不进 test —— 它要连一个真在跑的网关）
+bin/loadgen: $(LOADGEN) src/proto/frame.c src/proto/codec.c src/proto/crc16.c src/proto/escape.c
+	$(CC) $(CFLAGS) -pthread $(LOADGEN) src/proto/frame.c src/proto/codec.c src/proto/crc16.c src/proto/escape.c -o $@
 
 .PHONY: all clean test
 test: all

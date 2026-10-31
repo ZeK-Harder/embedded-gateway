@@ -2,6 +2,7 @@
 #define STORE_H
 
 #include <sqlite3.h>
+#include <pthread.h>    /* store_batch_t 里的互斥锁 */
 
 /* 打开（或新建）一个库文件。成功 rc=0 且 *out 可用；失败 -1 且 *out 不变。 */
 int store_open(const char *path, sqlite3 **out);
@@ -27,5 +28,28 @@ typedef void (*store_row_cb)(void *ctx, int dev_id, long long ts, int func, int 
  * 返回值与上面一致：0 成功 / -1 SQL 错 / -2 BUSY / -3 其他。
  * cb 传 NULL 时只数行不回调（后面要"查最近 N 条"的计数也用得上）。 */
 int store_query_recent(sqlite3 *db, int dev_id, int limit, store_row_cb cb, void *ctx);
+
+/* ===== 批量事务（2026-10-31 学生选 B）=====
+ * 背景（压测实测）：逐帧一个事务 ⇒ 每帧一次 fsync。50 连接实测服务端只处理 ~880 帧/秒，
+ *   回包积压后被整帧丢弃，错误率 38.6%；同一份负载把库换成 tmpfs（fsync 几乎免费）错误率 0.000%。
+ * 修法：把 STORE_BATCH_MAX 条 INSERT 并进一个事务，提交次数除以 64。
+ * 丢数据窗口：进程崩 / 断电最多丢「还没 COMMIT 的那一批」（≤64 帧或 ≤50ms）；已提交的一条不丢。
+ * 线程安全：内部一把互斥锁，多个 worker 可以同时调 store_insert_event_batched。
+ */
+#define STORE_BATCH_MAX  64
+#define STORE_BATCH_MS   50
+
+typedef struct {
+    sqlite3        *db;
+    int             in_tx;            /* 1 = 事务已 BEGIN，等 COMMIT */
+    int             pending;          /* 事务里攒了几条 */
+    long long       last_commit_ms;   /* 上次提交的单调时钟毫秒 */
+    pthread_mutex_t mu;
+} store_batch_t;
+
+int  store_batch_init(store_batch_t *b, sqlite3 *db);
+int  store_insert_event_batched(store_batch_t *b, int dev_id, long long ts, int func, int val);
+int  store_batch_flush(store_batch_t *b);
+void store_batch_close(store_batch_t *b);
 
 #endif
