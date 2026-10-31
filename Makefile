@@ -2,7 +2,13 @@ CC = gcc
 CFLAGS = -Wall -Wextra -Wshadow -std=c11 -g -Isrc/proto -Isrc/pool -Isrc/store -Isrc/crash
 # -g：带调试信息，addr2line 才能把崩溃日志里的偏移还原成"文件:行号"（发布版可以 strip 掉）
 
-all: bin/test_crc16 bin/test_decode bin/test_encode bin/test_escape bin/test_frame bin/gateway bin/test_pool bin/store_probe bin/crash_probe bin/loadgen
+all: bin bin/test_crc16 bin/test_decode bin/test_encode bin/test_escape bin/test_frame bin/gateway bin/test_pool bin/store_probe bin/crash_probe bin/loadgen
+
+# bin/ 是被 .gitignore 忽略的：新 clone 下来没有这个目录，
+# 不加这一条，gcc -o bin/xxx 会直接报 "No such file or directory"
+# 注意这条规则必须写在 all: 之后 —— make 的默认目标是文件里第一个目标
+bin:
+	mkdir -p bin
 
 bin/test_crc16: src/proto/crc16.c src/proto/test_crc16.c
 	$(CC) $(CFLAGS) src/proto/crc16.c src/proto/test_crc16.c -o $@
