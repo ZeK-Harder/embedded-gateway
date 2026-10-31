@@ -17,6 +17,7 @@
 #include "crash.h"          /* crash_install：崩溃现场记录（src/crash/） */
 #include <signal.h>
 #include <sys/eventfd.h>
+#include <pthread.h>     /* pthread_sigmask / pthread_create（信号线程） */
 
 #define MAX_CONN 1024
 #define POOL_WORKERS   4        /* worker 个数：按连接槽位分片 */
@@ -38,7 +39,7 @@ struct conn {
 
 static struct conn conns[MAX_CONN];
 static volatile sig_atomic_t g_stop = 0;      /* 只允许是这一种类型 */
-static void on_stop(int sig) { (void)sig; g_stop = 1; }   /* handler 里只写这一句 */
+/* 旧的 on_stop handler 已被信号线程取代（2026-10-31 选 B，见 signal_thread_main） */
 
 /* ---------- IO 线程只投递：线程池 + 回投通道 ----------
  *   g_pool    4 个 worker，投递时按连接槽位选队列（同一连接保序，不同连接并行）
@@ -51,8 +52,39 @@ static struct task_queue g_outq;
 static int  g_efd = -1;
 static int  g_epfd = -1;
 static char g_efd_tag;
+/* 信号线程（学生 2026-10-31 选 B）：整个进程只有它 sigwait 等 SIGINT / SIGTERM。
+ * 为什么不靠 handler：SIGINT 是进程级信号，内核投给**任意一个没屏蔽它的线程**；
+ *   落到 worker 上时 handler 跑了、g_stop 也置了，可是 IO 线程还堵在 epoll_wait 里
+ *   没人打断它 —— 主循环永远退不出来（verify/wsl-badframe-check.py 连跑 3 次全挂，
+ *   诊断：主线程 wchan=do_epoll_wait、4 个 worker wchan=futex_do_wait）。
+ * 现在收到信号就写 eventfd：它本来就注册在 epoll 里，IO 线程必然被叫醒。 */
+static void *signal_thread_main(void *arg)
+{
+    sigset_t set;
+    int sig = 0;
 
-static sqlite3 *g_db = NULL;   /* 落库：全进程一个连接（sqlite3 默认 serialized，多线程共享安全） */
+    (void)arg;
+    sigemptyset(&set);
+    sigaddset(&set, SIGINT);
+    sigaddset(&set, SIGTERM);
+
+    if (sigwait(&set, &sig) != 0) {          /* sigwait 返回错误码，不设 errno */
+        fprintf(stderr, "sigwait 失败\n");
+        return NULL;
+    }
+
+    g_stop = 1;                              /* 终态：不需要第二个信号 */
+    if (g_efd >= 0) {
+        uint64_t one = 1;
+        ssize_t w = write(g_efd, &one, sizeof one);
+        (void)w;                             /* 写不进去也无妨：下一次任何事件都会发现 g_stop */
+    }
+    return NULL;
+}
+
+
+static sqlite3 *g_db = NULL;
+static store_batch_t g_batch;   /* 批量落库状态（学生 2026-10-31 选 B） */   /* 落库：全进程一个连接（sqlite3 默认 serialized，多线程共享安全） */
 
 /* 一次投递带走的东西：帧字节的副本 + "我是哪条连接"（槽位 + 代数） */
 struct frame_job {
@@ -231,7 +263,7 @@ static void frame_job_run(void *arg)
     /* 落库：这一帧写进 events。IO 线程一行都不碰库 —— 磁盘再慢也只慢 worker。
      * val 先取 payload 的第一个字节（以后按 func 再解析具体含义）。 */
     int val  = (plen > 0) ? (int)payload[0] : 0;
-    int sret = store_insert_event(g_db, (int)dev, (long long)time(NULL), (int)func, val);
+    int sret = store_insert_event_batched(&g_batch, (int)dev, (long long)time(NULL), (int)func, val);
     if (sret == -1) {
         /* 数据不合规：丢这一帧，连接和后面的帧都继续 */
         printf("store: 数据不合规，丢这一帧 fd=%d seq=%u\n", fj->fd, (unsigned)seq);
@@ -281,6 +313,11 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
     printf("store db=%s ready\n", db_path);
+    if (store_batch_init(&g_batch, g_db) != 0) {
+        fprintf(stderr, "store_batch_init 失败\n");
+        store_close(g_db);
+        exit(EXIT_FAILURE);
+    }
 
 
     // ---------- 造门 ----------
@@ -336,6 +373,17 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
 
+    /* 线程与信号（学生 2026-10-31 选 B）：屏蔽必须**早于任何 pthread_create** ——
+     * 线程继承创建者的屏蔽字，晚一步就会漏出一个"能接信号"的线程，bug 就回来了。 */
+    sigset_t sigset_block;
+    sigemptyset(&sigset_block);
+    sigaddset(&sigset_block, SIGINT);
+    sigaddset(&sigset_block, SIGTERM);
+    if (pthread_sigmask(SIG_BLOCK, &sigset_block, NULL) != 0) {
+        fprintf(stderr, "pthread_sigmask 失败\n");
+        exit(EXIT_FAILURE);
+    }
+
     /* ---------- 起线程池 + 造回投通道 ---------- */
     g_epfd = epfd;
     if (taskq_init(&g_outq, POOL_QUEUE_CAP) != 0) {
@@ -359,13 +407,11 @@ int main(int argc, char **argv) {
     }
     printf("io tid=%ld  worker=%d\n", (long)pthread_self(), POOL_WORKERS);
 
-    struct sigaction sa;
-    memset(&sa, 0, sizeof sa);
-    sa.sa_handler = on_stop;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    if (sigaction(SIGINT, &sa, NULL) < 0 || sigaction(SIGTERM, &sa, NULL) < 0) {
-        perror("sigaction");
+    /* 信号线程（学生 2026-10-31 选 B）：这里不再装 handler ——
+     * SIGINT/SIGTERM 已被上面的 pthread_sigmask 屏蔽，只有这条线程 sigwait 等它们。 */
+    pthread_t th_sig;
+    if (pthread_create(&th_sig, NULL, signal_thread_main, NULL) != 0) {
+        fprintf(stderr, "信号线程起不来\n");
         exit(EXIT_FAILURE);
     }
 
@@ -385,6 +431,8 @@ int main(int argc, char **argv) {
             perror("epoll_wait");
             break;
         }
+
+        if (g_stop) break;   /* 信号线程敲了 eventfd：这轮事件没必要再处理 */
 
         for (int i = 0; i < n; i++) {
             struct conn *c = evs[i].data.ptr;
@@ -538,6 +586,10 @@ int main(int argc, char **argv) {
             }
         }
     }
+
+    /* 收工前把攒着的那一批提交掉：不提交 = 最后 ≤64 帧白写进内存 */
+    if (store_batch_flush(&g_batch) != 0)
+        fprintf(stderr, "store_batch_flush 收尾失败\n");
 
     close(g_efd);       /* eventfd 也是 fd，一起还 */
     close(listen_fd);
